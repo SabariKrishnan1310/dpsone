@@ -1,0 +1,100 @@
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dps_postgres_db
+    environment:
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U dps_one" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: dps_redis_cache
+    ports:
+      - "6379:6379"
+
+  ingestion_api:
+    build:
+      context: ./service_ingestion
+      dockerfile: Dockerfile
+    container_name: dps_ingestion_api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_web:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_web
+    command: daphne -b 0.0.0.0 -p 8001 dps_core.asgi:application
+
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_worker:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_worker
+    command: celery -A dps_core worker -l info
+    depends_on:
+      - db
+      - redis
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_listener:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_listener
+    command: python worker_listener.py
+    depends_on:
+      - redis
+      - management_worker
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      REDIS_HOST: redis
+
+volumes:
+  postgres_data:

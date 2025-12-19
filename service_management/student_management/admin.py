@@ -1,0 +1,227 @@
+# service_management/student_management/admin.py (FINAL, ROBUST FIX)
+
+from django.contrib import admin
+# We need to import forms and the base UserAdmin
+from django import forms 
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+
+from .models import (
+    # Custom User Model
+    StudentManagementUser, 
+    # Core Tenancy and Structure
+    School, 
+    Classroom, 
+    # Profile Models
+    Teacher, 
+    Parent, 
+    Student,
+    # RFID/Attendance
+    TapLog, 
+    AttendanceRecord,
+    RFIDCard,
+    # Timetable/Subjects
+    Subject,
+    TeacherSubjectMapping, 
+    TimetableEntry,
+    # Communications
+    Announcement,
+    MessageThread,
+    Message,
+    # Financial/Canteen
+    CanteenItem,
+    Wallet,
+    WalletTransaction,
+)
+
+# ----------------------------------------------------
+# 1. Custom User Forms (NEW CRITICAL ADDITION)
+# ----------------------------------------------------
+
+# Form used when editing an existing user (Change View)
+class StudentManagementUserChangeForm(forms.ModelForm):
+    class Meta:
+        model = StudentManagementUser
+        # Use all fields for simplicity, or explicitly list them (excluding 'username')
+        fields = '__all__'
+        
+# Form used when creating a new user (Add User page)
+# This explicitly defines the fields and excludes 'username'
+class StudentManagementUserCreationForm(forms.ModelForm):
+    # These fields are required by the BaseUserAdmin add_view logic
+    password = forms.CharField(label='Password', widget=forms.PasswordInput)
+    password2 = forms.CharField(label='Password confirmation', widget=forms.PasswordInput)
+
+    class Meta:
+        model = StudentManagementUser
+        # IMPORTANT: Use only the fields present in your custom model (StudentManagementUser)
+        fields = ('email', 'first_name', 'last_name', 'role', 'school')
+
+    def clean_password2(self):
+        # Basic password confirmation check
+        password = self.cleaned_data.get('password')
+        password2 = self.cleaned_data.get('password2')
+        if password and password2 and password != password2:
+            raise forms.ValidationError("Passwords don't match.")
+        return password2
+        
+# ----------------------------------------------------
+# 2. Custom User Admin Class
+# ----------------------------------------------------
+
+class CustomUserAdmin(BaseUserAdmin):
+    """Admin configuration for the custom user model."""
+    
+    # *** CRITICAL: Assign the custom forms to override BaseUserAdmin's defaults ***
+    form = StudentManagementUserChangeForm
+    add_form = StudentManagementUserCreationForm
+
+    list_display = ('email', 'first_name', 'last_name', 'role', 'school', 'is_staff')
+    search_fields = ('email', 'first_name', 'last_name')
+    ordering = ('email',)
+    
+    # 1. Fieldsets for the 'CHANGE' view (Editing existing user)
+    fieldsets = (
+        (None, {'fields': ('email', 'password')}), 
+        ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
+        ('Permissions', {
+            'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions'),
+        }),
+        ('Important dates', {'fields': ('last_login', 'date_joined')}),
+    )
+
+    # 2. Fieldsets for the 'ADD' view (Creating a new user)
+    # This must still be defined, but now it references fields from the add_form
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            # Note: Fields here must match fields defined in StudentManagementUserCreationForm
+            'fields': ('email', 'password', 'password2'), 
+        }),
+        ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser')}), 
+    )
+
+# Inline models for quick access
+class StudentInline(admin.StackedInline):
+    model = Student
+    can_delete = False
+    verbose_name_plural = 'Student Profile'
+    
+class TeacherInline(admin.StackedInline):
+    model = Teacher
+    can_delete = False
+    verbose_name_plural = 'Teacher Profile'
+
+class ParentInline(admin.StackedInline):
+    model = Parent
+    can_delete = False
+    verbose_name_plural = 'Parent Profile'
+    
+class StudentManagementUserAdmin(CustomUserAdmin):
+    """Main registration for the User model with inlines"""
+    inlines = [StudentInline, TeacherInline, ParentInline] 
+
+admin.site.register(StudentManagementUser, StudentManagementUserAdmin)
+
+
+# ----------------------------------------------------
+# 3. Core Structure Admin (Registrations)
+# ----------------------------------------------------
+
+@admin.register(School)
+class SchoolAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'is_active')
+    prepopulated_fields = {'slug': ('name',)}
+
+@admin.register(Classroom)
+class ClassroomAdmin(admin.ModelAdmin):
+    list_display = ('school', 'grade', 'section', 'class_teacher', 'room_number')
+    list_filter = ('school', 'grade')
+    search_fields = ('grade', 'section')
+
+@admin.register(Teacher)
+class TeacherAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'subject_specialization', 'is_active')
+    search_fields = ('last_name', 'first_name')
+    list_filter = ('school', 'subject_specialization')
+    
+@admin.register(Parent)
+class ParentAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'relation')
+    search_fields = ('last_name', 'first_name')
+
+@admin.register(Student)
+class StudentAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'classroom', 'roll_number', 'rfid_uid', 'is_active')
+    list_filter = ('school', 'classroom', 'is_active')
+    search_fields = ('last_name', 'rfid_uid', 'admission_number')
+
+
+# ----------------------------------------------------
+# 4. RFID/Attendance Admin
+# ----------------------------------------------------
+
+@admin.register(TapLog)
+class TapLogAdmin(admin.ModelAdmin):
+    list_display = ('rfid_uid', 'timestamp', 'direction', 'device_id', 'school')
+    list_filter = ('school', 'direction')
+    search_fields = ('rfid_uid', 'device_id')
+    readonly_fields = ('timestamp', 'raw_data')
+
+@admin.register(AttendanceRecord)
+class AttendanceRecordAdmin(admin.ModelAdmin):
+    list_display = ('student', 'date', 'status', 'tap_timestamp', 'source')
+    list_filter = ('school', 'status', 'date')
+    search_fields = ('student__last_name',)
+    date_hierarchy = 'date'
+
+@admin.register(RFIDCard)
+class RFIDCardAdmin(admin.ModelAdmin):
+    list_display = ('uid', 'status', 'assigned_to_student', 'assigned_to_teacher', 'issued_at')
+    list_filter = ('school', 'status')
+    search_fields = ('uid',)
+    
+# ----------------------------------------------------
+# 5. Timetable/Subjects Admin
+# ----------------------------------------------------
+
+@admin.register(Subject)
+class SubjectAdmin(admin.ModelAdmin):
+    list_display = ('name', 'code', 'school')
+    list_filter = ('school',)
+
+@admin.register(TeacherSubjectMapping)
+class TeacherSubjectMappingAdmin(admin.ModelAdmin):
+    list_display = ('teacher', 'subject', 'classroom', 'is_active')
+    list_filter = ('school', 'is_active')
+
+@admin.register(TimetableEntry)
+class TimetableEntryAdmin(admin.ModelAdmin):
+    list_display = ('classroom', 'day_of_week', 'period_number', 'subject', 'teacher')
+    list_filter = ('school', 'day_of_week', 'classroom')
+    list_editable = ('teacher',)
+
+# ----------------------------------------------------
+# 6. Communication/Other Admin
+# ----------------------------------------------------
+
+@admin.register(Announcement)
+class AnnouncementAdmin(admin.ModelAdmin):
+    list_display = ('title', 'scope', 'classroom', 'created_by')
+    list_filter = ('scope', 'school')
+
+@admin.register(Wallet)
+class WalletAdmin(admin.ModelAdmin):
+    list_display = ('student', 'balance', 'updated_at')
+    search_fields = ('student__last_name',)
+    list_filter = ('school',)
+
+@admin.register(WalletTransaction)
+class WalletTransactionAdmin(admin.ModelAdmin):
+    list_display = ('wallet', 'type', 'amount', 'timestamp')
+    list_filter = ('type', 'school')
+
+@admin.register(MessageThread)
+class MessageThreadAdmin(admin.ModelAdmin):
+    list_display = ('student', 'teacher', 'created_at')
+    list_filter = ('school',)

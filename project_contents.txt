@@ -1,0 +1,3707 @@
+./Dockerfile:
+
+./docker-compose.yml:
+version: '3.9'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dps_postgres_db
+    environment:
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U dps_one" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: dps_redis_cache
+    ports:
+      - "6379:6379"
+
+  ingestion_api:
+    build:
+      context: ./service_ingestion
+      dockerfile: Dockerfile
+    container_name: dps_ingestion_api
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_web:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_web
+    command: python manage.py runserver 0.0.0.0:8001
+    ports:
+      - "8001:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_worker:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_worker
+    command: celery -A dps_core worker -l info
+    depends_on:
+      - db
+      - redis
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: dps_one_db
+      POSTGRES_USER: dps_one
+      POSTGRES_PASSWORD: strong_dps_one
+
+  management_listener:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: dps_management_listener
+    command: python worker_listener.py
+    depends_on:
+      - redis
+      - management_worker
+    environment:
+      DJANGO_SETTINGS_MODULE: dps_core.settings
+      REDIS_HOST: redis
+
+volumes:
+  postgres_data:
+./database.py:
+
+./service_ingestion/Dockerfile:
+# service_ingestion/Dockerfile
+FROM python:3.11-slim 
+
+WORKDIR /app
+
+# Install system dependencies needed for psycopg2-binary
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy the rest of the application code
+COPY . .
+
+# FastAPI runs on internal port 8000
+EXPOSE 8000 
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+./service_ingestion/models.py:
+# service_ingestion/database.py
+import os
+import time
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, text
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
+from datetime import datetime
+
+# --- Environment Setup (Reads from docker-compose) ---
+DB_USER = os.environ.get("POSTGRES_USER")
+DB_PASS = os.environ.get("POSTGRES_PASSWORD")
+DB_HOST = os.environ.get("POSTGRES_HOST")
+DB_NAME = os.environ.get("POSTGRES_DB")
+
+# Database URL for SQLAlchemy
+SQLALCHEMY_DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASS}@{DB_HOST}/{DB_NAME}"
+
+# 1. Engine Creation
+engine = create_engine(SQLALCHEMY_DATABASE_URL)
+
+# 2. Session Setup
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+# 3. Base Class for ORM Models
+Base = declarative_base()
+
+# 4. Table Model (The Attendance Log)
+class AttendanceLog(Base):
+    __tablename__ = "attendance_log"
+    
+    log_id = Column(Integer, primary_key=True, index=True)
+    rfid_uid = Column(String, index=True, nullable=False)
+    
+    # --- NEW FIELDS ADDED ---
+    school_id = Column(String, nullable=False, index=True) # Identifier for the school (e.g., "DPS_001")
+    location = Column(String, nullable=True)             # User-friendly name (e.g., "Main Gate")
+    role = Column(String, nullable=False, default="STUDENT") # STUDENT or STAFF
+    current_time = Column(DateTime, default=datetime.utcnow) # This will store the time the DEVICE sent the tap
+    # ------------------------
+
+    device_id = Column(String, nullable=False)
+    status = Column(String, default="IN") 
+    timestamp = Column(DateTime, default=datetime.utcnow) # This remains the DB insertion time
+# Dependency to get a DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Function to ensure DB connection and create tables
+def create_tables():
+    # Wait for the DB service to be fully ready
+    print("Attempting to connect to PostgreSQL...")
+    connected = False
+    max_retries = 10
+    retry_count = 0
+    while not connected and retry_count < max_retries:
+        try:
+            with engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            print("PostgreSQL connection successful.")
+            connected = True
+        except Exception:
+            retry_count += 1
+            print(f"Connection failed, retrying in 3 seconds... (Attempt {retry_count}/{max_retries})")
+            time.sleep(3)
+            
+    if not connected:
+        raise Exception("Could not connect to PostgreSQL database after multiple retries.")
+            
+    # Create tables defined in the Base class
+    Base.metadata.create_all(bind=engine)
+    print("AttendanceLog table ensured.")
+./service_ingestion/main.py:
+import os
+import json
+import redis
+from fastapi import FastAPI, Depends, status, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+from datetime import datetime, timezone # <-- Added timezone for best practice
+import json
+from sqlalchemy.orm import Session
+from models import AttendanceLog, get_db, create_tables 
+import redis.asyncio as aioredis
+import asyncio
+import httpx
+
+# --- Setup ---
+app = FastAPI(title="DPS ONE Ingestion API (Phase 1)")
+
+# 1. Initialize Redis Connections
+REDIS_HOST = os.environ.get("REDIS_HOST")
+# Synchronous client for the API endpoint
+sync_redis = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+# Asynchronous client for the WebSocket listener
+async def get_async_redis_client():
+    return aioredis.from_url(f"redis://{REDIS_HOST}:6379", decode_responses=True)
+
+
+# 2. Pydantic Model for incoming data (Input Validation)
+class TapData(BaseModel):
+    rfid_uid: str
+    device_id: str
+    status: str = "IN" 
+
+    # --- NEW FIELDS ADDED for enriched data ---
+    school_id: str
+    location: str | None = None
+    # Use UTC for consistency
+    cur_time: datetime = Field(alias="current_time", default_factory=lambda: datetime.now(timezone.utc)) 
+    role: str = "STUDENT"
+    # -------------------------------------------
+
+# 3. Startup Event: Create Database Tables
+@app.on_event("startup")
+def on_startup():
+    # Ensure tables are created when the container starts
+    create_tables()
+
+# 4. Health Check Endpoint
+@app.get("/")
+def read_root():
+    return {"status": "Ingestion API Running", "message": "Ready to receive taps."}
+
+
+@app.post("/iot/tap", status_code=status.HTTP_202_ACCEPTED)
+def receive_tap(data: TapData, db: Session = Depends(get_db)):
+    """
+    Receives an RFID tap, looks up user details from Django (Data Enrichment),
+    logs the enriched data to PostgreSQL, and publishes to Redis.
+    """
+    
+    # 1. API Call for Data Enrichment (Lookup to Django Management Service)
+    # Uses the standardized service name and internal port (8000)
+    # service_ingestion/main.py (Inside receive_tap function)
+
+
+# 1. API Call for Data Enrichment (Lookup to Django Management Service)
+    # Use the container name defined in docker-compose.yml
+    DJANGO_LOOKUP_URL = f"http://dps_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
+    try:
+        # Use httpx to synchronously call the Django API
+        response = httpx.get(DJANGO_LOOKUP_URL)
+        response.raise_for_status() # Raise an exception for 4xx/5xx status codes
+        
+        # Get the enriched data from Django
+        enriched_data = response.json()
+        
+        # Override the defaults in TapData with the authoritative data from Django
+        data.school_id = enriched_data.get('school_id', data.school_id)
+        data.role = enriched_data.get('role', data.role)
+        
+    except httpx.HTTPStatusError as e:
+        # Student not found (404) or other HTTP error
+        print(f"ERROR: Lookup failed for {data.rfid_uid}. HTTP Status: {e.response.status_code}. Using fallback data.")
+        # We still proceed to log the tap, but the school_id/role will use the
+        # defaults or the data provided in the original tap request ('IGNORED').
+        
+    except httpx.RequestError as e:
+        # Network/Connection error (e.g., Django service is down)
+        print(f"FATAL ERROR: Could not connect to Django Management API: {e}. Using fallback data.")
+        # Proceed with logging based on request data alone
+
+    # 2. Log to PostgreSQL (Data Persistence)
+    new_log = AttendanceLog(
+        rfid_uid=data.rfid_uid,
+        device_id=data.device_id,
+        status=data.status,
+        
+        # Use potentially enriched data
+        school_id=data.school_id, 
+        location=data.location,
+        role=data.role,
+        current_time=data.cur_time,
+    )
+    db.add(new_log)
+    db.commit()
+    db.refresh(new_log) # Refreshes to get log_id and database timestamp
+
+    # 3. Publish to Redis (Real-Time Update Bus)
+    realtime_data = {
+        "log_id": new_log.log_id,
+        "uid": data.rfid_uid,
+        "status": data.status,
+        
+        # Publish enriched data
+        "school": data.school_id,
+        "location": data.location,
+        "role": data.role,
+        "tap_time": new_log.current_time.isoformat(), # Use the time saved to DB
+        
+        "device": data.device_id,
+        "db_time": new_log.timestamp.isoformat()
+    }
+    
+    sync_redis.publish('live_attendance', json.dumps(realtime_data))
+    
+    return {"message": "Tap recorded and published", "log_id": new_log.log_id}
+
+
+# --- WebSocket Endpoint (Real-Time Dashboard Engine) ---
+@app.websocket("/ws/live-dashboard")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    
+    try:
+        redis_client = await get_async_redis_client()
+        pubsub = redis_client.pubsub()
+        await pubsub.subscribe('live_attendance')
+        
+        await websocket.send_text(json.dumps({"message": "Subscription started. Waiting for taps..."}))
+        
+        # Listen for messages from Redis and push them to the browser
+        async for message in pubsub.listen():
+            if message and message['type'] == 'message':
+                # The message['data'] is the JSON string published by /iot/tap
+                try:
+                    # Send the data directly to the connected client
+                    await websocket.send_text(message['data'])
+                except Exception as e:
+                    print(f"Error sending message to client: {e}")
+            
+    except WebSocketDisconnect:
+        print(f"Client disconnected from WebSocket.")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        
+    finally:
+        if 'pubsub' in locals() and pubsub:
+            await pubsub.unsubscribe('live_attendance')
+        if 'redis_client' in locals() and redis_client:
+            await redis_client.close()
+./main.py:
+
+./service_management/Dockerfile:
+# service_management/Dockerfile (Corrected)
+
+# Base Image
+FROM python:3.11-alpine
+
+# Set environment variables for non-interactive commands
+ENV PYTHONUNBUFFERED 1
+
+# Create the app directory and set it as working directory
+WORKDIR /usr/src/app
+
+# Copy requirements file and install dependencies FIRST (for cache)
+COPY requirements.txt /usr/src/app/
+
+# CRITICAL FIX: Add 'libpq-dev' for psycopg2 to compile, and 'build-base' 
+# for general compilation tools.
+RUN apk update && \
+    apk add --no-cache postgresql-client libpq-dev build-base
+
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+# Remove build dependencies to keep the image small
+RUN apk del build-base 
+
+# Copy the rest of the application code
+COPY . /usr/src/app/
+
+# The CMD is defined in docker-compose.yml for web/worker/listener
+./service_management/core/__init__.py:
+
+./service_management/core/services/exceptions.py:
+class BaseServiceException(Exception):
+    """Base class for all business logic exceptions."""
+    def __init__(self, message, code=None):
+        self.message = message
+        self.code = code or "service_error"
+        super().__init__(self.message)
+
+class ValidationError(BaseServiceException):
+    """Raised when data fails business rule validation."""
+    pass
+
+class ResourceNotFoundError(BaseServiceException):
+    """Raised when a required object (School, Class, etc.) is missing."""
+    pass
+
+class BusinessRuleViolation(BaseServiceException):
+    """Raised when an action violates a specific school policy."""
+    pass
+./service_management/core/services/finance_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    Wallet, WalletTransaction, School, Student
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError
+)
+
+class FinanceService:
+    """
+    Handles business logic for financial transactions, including wallet operations,
+    payment validation, and fee/fine management.
+    """
+
+    TRANSACTION_TYPES = {
+        'CREDIT': WalletTransaction.TRANSACTION_TYPE_CREDIT,
+        'DEBIT': WalletTransaction.TRANSACTION_TYPE_DEBIT
+    }
+
+    # --- ABSTRACTED PAYMENT GATEWAY INTEGRATION ---
+    @staticmethod
+    def _process_external_payment(amount: float, gateway_data: dict) -> str:
+        """
+        [PLACEHOLDER] Simulates/initiates communication with an external provider (e.g., Razorpay, Stripe).
+        
+        In a real production environment, this would involve:
+        1. Calling the payment gateway's API.
+        2. Verifying the payment status (e.g., successful, pending, failed).
+        3. Returning a unique transaction ID (Razorpay ID).
+        """
+        # --- PLACEHOLDER LOGIC ---
+        if not gateway_data.get('transaction_id'):
+            raise BusinessRuleViolation("External payment gateway verification failed (Missing Transaction ID).")
+        if amount <= 0:
+            raise ValidationError("Payment amount must be positive.")
+        # --- END PLACEHOLDER ---
+
+        # Return the verified transaction ID from the payment gateway
+        return gateway_data['transaction_id'] 
+
+    # --- HELPERS AND VALIDATION ---
+    
+    @staticmethod
+    def _get_wallet_by_student(student_id: int) -> Wallet:
+        """Retrieves or creates the wallet for a given student."""
+        student = get_object_or_404(Student, pk=student_id)
+        # Use get_or_create to ensure every student has a wallet
+        wallet, created = Wallet.objects.get_or_create(
+            student=student, 
+            school=student.school,
+            defaults={'balance': 0.00}
+        )
+        return wallet
+
+    # --- CORE TRANSACTION LOGIC ---
+
+    @classmethod
+    @transaction.atomic
+    def process_wallet_top_up(
+        cls, 
+        student_id: int, 
+        amount: float, 
+        payment_method: str, 
+        gateway_data: dict
+    ) -> WalletTransaction:
+        """
+        Processes an external payment (top-up) and credits the student's wallet.
+        Enforces payment validity rules.
+        """
+        if amount <= 0:
+            raise ValidationError("Top-up amount must be positive.")
+            
+        # 1. Payment Validity Rule: Verify the transaction with the external gateway
+        external_id = cls._process_external_payment(amount, gateway_data)
+        
+        # 2. Check for duplicate processing using the external ID
+        if WalletTransaction.objects.filter(external_transaction_id=external_id).exists():
+            raise DuplicateEntryError(f"Payment {external_id} has already been processed.")
+
+        # 3. Get Wallet
+        wallet = cls._get_wallet_by_student(student_id)
+
+        # 4. Execution (Credit Wallet)
+        wallet.balance += amount
+        wallet.save(update_fields=['balance'])
+
+        # 5. Create Transaction Record
+        transaction_record = WalletTransaction.objects.create(
+            wallet=wallet,
+            school=wallet.school,
+            transaction_type=cls.TRANSACTION_TYPES['CREDIT'],
+            amount=amount,
+            current_balance=wallet.balance,
+            description=f"Top-up via {payment_method}",
+            external_transaction_id=external_id
+        )
+
+        return transaction_record
+
+    @classmethod
+    @transaction.atomic
+    def process_canteen_purchase(cls, student_id: int, purchase_amount: float, item_id: int) -> WalletTransaction:
+        """
+        Debits the student's wallet for a canteen purchase.
+        Enforces inventory stock constraints (conceptually).
+        """
+        if purchase_amount <= 0:
+            raise ValidationError("Purchase amount must be positive.")
+
+        # 1. Get Wallet
+        wallet = cls._get_wallet_by_student(student_id)
+
+        # 2. Business Rule: Check Inventory Stock Constraint
+        # NOTE: This is where InventoryService (if created) would be called.
+        # if not InventoryService.check_stock(item_id, 1):
+        #     raise BusinessRuleViolation("Canteen item is out of stock.")
+        
+        # 3. Business Rule: Sufficient Funds Check
+        if wallet.balance < purchase_amount:
+            raise BusinessRuleViolation(
+                f"Insufficient funds. Wallet balance: {wallet.balance}, Required: {purchase_amount}"
+            )
+
+        # 4. Execution (Debit Wallet)
+        wallet.balance -= purchase_amount
+        wallet.save(update_fields=['balance'])
+
+        # 5. Create Transaction Record
+        transaction_record = WalletTransaction.objects.create(
+            wallet=wallet,
+            school=wallet.school,
+            transaction_type=cls.TRANSACTION_TYPES['DEBIT'],
+            amount=purchase_amount,
+            current_balance=wallet.balance,
+            description="Canteen purchase"
+        )
+        
+        # 6. Side Effect: Reduce Canteen Stock (Conceptual)
+        # InventoryService.reduce_stock(item_id, 1)
+
+        return transaction_record
+./service_management/core/services/messaging_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    School, StudentManagementUser, Announcement, MessageThread, Message, Student, Teacher
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError
+)
+
+class MessagingService:
+    """
+    Handles business logic for all communications: announcements and private messages,
+    ensuring targeted delivery and adherence to roles.
+    """
+
+    @staticmethod
+    def _validate_user(user_id: int, school: School) -> StudentManagementUser:
+        """Helper to ensure the user exists and belongs to the school."""
+        try:
+            user = StudentManagementUser.objects.get(pk=user_id, school=school)
+        except StudentManagementUser.DoesNotExist:
+            raise ResourceNotFoundError(f"User ID {user_id} not found in school {school.pk}.")
+        if not user.is_active:
+            raise BusinessRuleViolation(f"User ID {user_id} is inactive.")
+        return user
+    
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    # --- ANNOUNCEMENT LOGIC ---
+
+    @classmethod
+    @transaction.atomic
+    def publish_announcement(
+        cls, 
+        school_id: int, 
+        author_id: int, 
+        title: str, 
+        content: str, 
+        target_roles: list[str]
+    ) -> Announcement:
+        """
+        Creates and publishes a school-wide announcement targeting specific user roles.
+        """
+        school = cls._validate_school_context(school_id)
+        author = cls._validate_user(author_id, school)
+        
+        # 1. Validation: Author Role Check
+        # Only certain roles (e.g., Admin, Principal) should be allowed to publish announcements.
+        if author.role not in ['Admin', 'Principal', 'Staff']:
+            raise BusinessRuleViolation("Only authorized users can publish school announcements.")
+
+        # 2. Validation: Target Roles
+        valid_roles = [role[0] for role in StudentManagementUser.ROLE_CHOICES]
+        if not all(role in valid_roles for role in target_roles):
+             raise ValidationError("One or more target roles are invalid.")
+
+        # 3. Execution (Creation)
+        announcement = Announcement.objects.create(
+            school=school,
+            author=author,
+            title=title,
+            content=content,
+            # Store targets as a list of roles (assuming your model supports this, e.g., JSONField)
+            target_roles=target_roles, 
+            is_published=True,
+            published_at=datetime.now()
+        )
+        
+        # 4. Side Effect: Notification queue trigger
+        # NotificationService.queue_announcement(announcement)
+        
+        return announcement
+
+    # --- PRIVATE MESSAGING LOGIC ---
+
+    @classmethod
+    @transaction.atomic
+    def start_new_thread(
+        cls, 
+        school_id: int, 
+        sender_id: int, 
+        recipient_ids: list[int], 
+        subject: str
+    ) -> MessageThread:
+        """
+        Creates a new message thread involving one sender and multiple recipients.
+        """
+        school = cls._validate_school_context(school_id)
+        
+        # 1. Validation: Sender/Recipients
+        sender = cls._validate_user(sender_id, school)
+        recipients = [cls._validate_user(rid, school) for rid in recipient_ids]
+        
+        # 2. Business Rule: Prevent self-messaging thread (optional)
+        if sender_id in recipient_ids:
+            raise BusinessRuleViolation("Cannot start a thread with yourself listed as a recipient.")
+
+        # 3. Execution (Creation)
+        all_participants = [sender] + recipients
+        
+        thread = MessageThread.objects.create(
+            school=school,
+            subject=subject
+        )
+        
+        # Add all users to the thread's many-to-many field
+        thread.participants.set(all_participants) 
+
+        return thread
+
+    @classmethod
+    @transaction.atomic
+    def send_message(
+        cls, 
+        thread_id: int, 
+        sender_id: int, 
+        content: str
+    ) -> Message:
+        """
+        Adds a message to an existing thread.
+        """
+        thread = get_object_or_404(MessageThread, pk=thread_id)
+        school = thread.school
+        
+        # 1. Validation: Sender must be a participant in the thread
+        sender = cls._validate_user(sender_id, school)
+        if sender not in thread.participants.all():
+            raise BusinessRuleViolation("Sender is not a participant in this message thread.")
+
+        # 2. Execution (Creation)
+        message = Message.objects.create(
+            thread=thread,
+            sender=sender,
+            content=content,
+            sent_at=datetime.now()
+        )
+        
+        # 3. Side Effect: Update thread's last activity time and notify recipients
+        thread.last_message_at = message.sent_at
+        thread.save(update_fields=['last_message_at'])
+        
+        # NotificationService.notify_recipients(thread, message)
+
+        return message
+./service_management/core/services/student_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import Student, Classroom, Parent, School
+from core.services.exceptions import (
+    ValidationError, 
+    ResourceNotFoundError, 
+    BusinessRuleViolation, 
+    ObjectNotActiveError,
+    DuplicateEntryError
+)
+
+class StudentService:
+    """Handles business logic related to the Student model, including enrollment and updates."""
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            school = School.objects.get(pk=school_id)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found.")
+        
+        if not school.is_active:
+            raise ObjectNotActiveError(f"School '{school.name}' is currently inactive.")
+        
+        return school
+
+    @staticmethod
+    def _validate_classroom(classroom_id: int, school: School) -> Classroom:
+        """Helper to validate if a classroom exists in the given school and is active."""
+        try:
+            classroom = Classroom.objects.get(pk=classroom_id, school=school)
+        except Classroom.DoesNotExist:
+            raise ResourceNotFoundError(f"Classroom ID {classroom_id} not found in school {school.pk}.")
+        
+        if not classroom.is_active:
+            raise ObjectNotActiveError(f"Classroom {classroom.grade}-{classroom.section} is inactive.")
+            
+        # Optional: Classroom capacity check
+        # if classroom.students.count() >= classroom.capacity:
+        #     raise BusinessRuleViolation("Classroom has reached maximum capacity.")
+            
+        return classroom
+    
+    @staticmethod
+    def _validate_unique_enrollment(school: School, admission_number: str, rfid_uid: str = None):
+        """Checks for uniqueness of critical enrollment fields within the school."""
+        
+        if Student.objects.filter(school=school, admission_number=admission_number).exists():
+            raise DuplicateEntryError(f"Admission number '{admission_number}' is already taken.")
+            
+        if rfid_uid and Student.objects.filter(school=school, rfid_uid=rfid_uid).exists():
+            raise DuplicateEntryError(f"RFID UID '{rfid_uid}' is already assigned to a student.")
+            
+    @classmethod
+    @transaction.atomic
+    def enroll_new_student(
+        cls, 
+        school_id: int, 
+        classroom_id: int, 
+        parent_id: int, 
+        student_data: dict
+    ) -> Student:
+        """
+        Validates all necessary prerequisites and creates a new Student record.
+        """
+        # 1. Validation and Resource Retrieval
+        school = cls._validate_school_context(school_id)
+        classroom = cls._validate_classroom(classroom_id, school)
+        
+        try:
+            parent = Parent.objects.get(pk=parent_id, school=school)
+        except Parent.DoesNotExist:
+            raise ResourceNotFoundError("Parent record must exist before student enrollment.")
+        
+        # Validate data integrity from input
+        required_fields = ['first_name', 'last_name', 'admission_number']
+        for field in required_fields:
+            if not student_data.get(field):
+                raise ValidationError(f"Missing required field: {field}")
+                
+        # 2. Business Rule Validation
+        cls._validate_unique_enrollment(
+            school=school, 
+            admission_number=student_data.get('admission_number'),
+            rfid_uid=student_data.get('rfid_uid')
+        )
+
+        # 3. Execution (Creation)
+        student = Student.objects.create(
+            school=school,
+            classroom=classroom,
+            parent=parent,
+            first_name=student_data['first_name'],
+            last_name=student_data['last_name'],
+            admission_number=student_data['admission_number'],
+            roll_number=student_data.get('roll_number'),
+            rfid_uid=student_data.get('rfid_uid', ''), # Allow blank if not provided
+            is_fully_enrolled=True # Assuming enrollment means they are active
+        )
+        
+        # 4. Side Effect (Optional: Send welcome email to parent)
+        # MessagingService.send_enrollment_confirmation(parent, student)
+        
+        return student
+
+    @classmethod
+    @transaction.atomic
+    def update_student_classroom(cls, student_id: int, new_classroom_id: int) -> Student:
+        """Transfers a student to a new classroom after validation."""
+        
+        student = get_object_or_404(Student, pk=student_id)
+        
+        # 1. Validation: Ensure new classroom is valid within the student's school
+        new_classroom = cls._validate_classroom(new_classroom_id, student.school)
+        
+        # 2. Execution (Update)
+        if student.classroom_id != new_classroom_id:
+            student.classroom = new_classroom
+            student.save(update_fields=['classroom'])
+            
+            # 3. Side Effect (Optional: Log transfer for audit)
+            # LogService.log_event(student.school, 'CLASS_TRANSFER', f'Student {student.pk} transferred to {new_classroom.pk}')
+        
+        return student
+./service_management/core/services/__init__.py:
+
+./service_management/core/services/rfid_service.py:
+# core/services/rfid_service.py (FINAL CORRECTED VERSION)
+
+import json
+import traceback
+from datetime import datetime
+from django.contrib.auth import get_user_model 
+
+# --- Import required models from student_management ---
+from student_management.models import (
+    Student, 
+    School, 
+    TapLog, 
+    AttendanceRecord,
+)
+
+# Define the user model using the standard Django method
+StudentManagementUser = get_user_model() 
+
+
+class RfidService:
+    @staticmethod
+    def process_student_tap(school_id: str, rfid_uid: str, device_id: str, timestamp_str: str):
+        """
+        Main logic to process an RFID tap, creating a TapLog and AttendanceRecord.
+        This method name is specifically process_student_tap to match the call in tasks.py.
+        """
+        try:
+            # 1. Look up School
+            try:
+                # school_id is passed as a string from the API, convert back to int for FK lookup
+                school = School.objects.get(pk=int(school_id))
+            except School.DoesNotExist:
+                print(f"ERROR: School with ID {school_id} not found.")
+                return
+            except ValueError:
+                # Handles cases where school_id="ABC" instead of "1"
+                print(f"ERROR: School ID '{school_id}' is not a valid integer.")
+                return
+
+            # 2. Look up Student
+            try:
+                # Assuming rfid_uid is unique per school
+                student = Student.objects.get(school=school, rfid_uid=rfid_uid)
+            except Student.DoesNotExist:
+                print(f"WARNING: Student not found for RFID UID: {rfid_uid}. Logging tap only.")
+                student = None 
+
+            # Prepare timestamp and direction
+            # Handles 'Z' for UTC if present
+            tap_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+            
+            # Determine direction from device_id convention
+            direction = 'IN' if device_id.endswith('_IN') else 'OUT'
+            
+            # 3. Create TapLog (Raw Log)
+            TapLog.objects.create(
+                school=school,
+                rfid_uid=rfid_uid,
+                timestamp=tap_time,
+                device_id=device_id,
+                direction=direction,
+                raw_data={
+                    "rfid_uid": rfid_uid, 
+                    "device_id": device_id, 
+                    "tap_time": timestamp_str, 
+                    "school_id": school_id
+                }
+            )
+            print(f"TapLog created successfully for {rfid_uid}")
+
+
+            # 4. Create Attendance Record (Only if student is found)
+            if student:
+                # Use get_or_create to prevent duplicate entries for the same date/student
+                AttendanceRecord.objects.get_or_create(
+                    school=school,
+                    student=student,
+                    date=tap_time.date(),
+                    defaults={
+                        'status': 'PRESENT',
+                        'tap_timestamp': tap_time,
+                        'source': 'RFID'
+                    }
+                )
+                print(f"Attendance record created/updated for {student.last_name}")
+            
+        except Exception as e:
+            # CRITICAL FAILURE: Print the full traceback before letting Celery retry
+            print("==========================================================================")
+            print(f"CRITICAL DATABASE ERROR processing tap {rfid_uid}: {e}")
+            traceback.print_exc() # Prints the detailed error trace
+            print("==========================================================================")
+            raise # Re-raise to let Celery handle retries
+./service_management/core/services/timetable_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    TimetableEntry, Teacher, Classroom, Subject, School, StudentManagementUser
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError,
+    DuplicateEntryError
+)
+
+class TimetableService:
+    """
+    Handles business logic for creating and managing Timetable Entries, 
+    enforcing constraints against double-booking teachers, classrooms, and time slots.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _get_resource_by_id(model, pk: int, school: School, resource_name: str):
+        """Generic helper to fetch a resource."""
+        try:
+            return model.objects.get(pk=pk, school=school)
+        except model.DoesNotExist:
+            raise ResourceNotFoundError(f"{resource_name} ID {pk} not found in school {school.pk}.")
+
+    @classmethod
+    def _check_time_conflict(cls, school: School, day_of_week: str, start_time: str, end_time: str, exclude_id: int = None):
+        """
+        Checks for any existing timetable entries that overlap with the proposed slot.
+        """
+        
+        # 1. Self-Correction/Validation for Time Strings (Assuming Django TimeField)
+        try:
+            # Simple check that times can be interpreted
+            datetime.strptime(start_time, "%H:%M:%S")
+            datetime.strptime(end_time, "%H:%M:%S")
+        except ValueError:
+            raise ValidationError("Time must be provided in 'HH:MM:SS' format.")
+        
+        # 2. Look for overlapping entries
+        # Overlap logic: (start_A < end_B) AND (end_A > start_B)
+        
+        conflict_query = TimetableEntry.objects.filter(
+            school=school,
+            day_of_week=day_of_week,
+            # The new slot starts before the existing slot ends
+            start_time__lt=end_time,
+            # The new slot ends after the existing slot starts
+            end_time__gt=start_time
+        )
+        
+        if exclude_id:
+            conflict_query = conflict_query.exclude(pk=exclude_id)
+            
+        return conflict_query
+
+
+    @classmethod
+    @transaction.atomic
+    def create_timetable_entry(
+        cls,
+        school_id: int,
+        day_of_week: str,
+        start_time: str,
+        end_time: str,
+        teacher_id: int,
+        classroom_id: int,
+        subject_id: int,
+    ) -> TimetableEntry:
+        """
+        Creates a new timetable entry after checking for time conflicts across all resources.
+        """
+        # 1. Validation and Resource Retrieval
+        school = cls._validate_school_context(school_id)
+        teacher = cls._get_resource_by_id(Teacher, teacher_id, school, 'Teacher')
+        classroom = cls._get_resource_by_id(Classroom, classroom_id, school, 'Classroom')
+        subject = cls._get_resource_by_id(Subject, subject_id, school, 'Subject')
+        
+        # 2. Business Rule: Resource Conflict Checks
+        
+        # Check 2a: Teacher conflict
+        teacher_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time).filter(teacher=teacher)
+        if teacher_conflicts.exists():
+            raise BusinessRuleViolation(
+                f"Teacher {teacher.last_name} is already booked for an overlapping slot."
+            )
+
+        # Check 2b: Classroom conflict
+        # A physical classroom can only hold one class at a time.
+        classroom_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time).filter(classroom=classroom)
+        if classroom_conflicts.exists():
+            raise BusinessRuleViolation(
+                f"Classroom {classroom.room_number} is already booked for an overlapping slot."
+            )
+
+        # 3. Execution (Creation)
+        entry = TimetableEntry.objects.create(
+            school=school,
+            day_of_week=day_of_week,
+            start_time=start_time,
+            end_time=end_time,
+            teacher=teacher,
+            classroom=classroom,
+            subject=subject,
+        )
+
+        return entry
+    
+    @classmethod
+    @transaction.atomic
+    def update_timetable_entry(cls, entry_id: int, update_data: dict) -> TimetableEntry:
+        """
+        Updates an existing timetable entry, re-validating conflicts based on new data.
+        """
+        entry = get_object_or_404(TimetableEntry, pk=entry_id)
+        school = entry.school
+        
+        # Pull existing values for fields that might not be updated
+        day_of_week = update_data.get('day_of_week', entry.day_of_week)
+        start_time = update_data.get('start_time', entry.start_time.isoformat())
+        end_time = update_data.get('end_time', entry.end_time.isoformat())
+        teacher = entry.teacher # Default to existing teacher
+        classroom = entry.classroom # Default to existing classroom
+        
+        # 1. Resolve potential resource changes
+        if 'teacher_id' in update_data:
+            teacher = cls._get_resource_by_id(Teacher, update_data['teacher_id'], school, 'Teacher')
+            entry.teacher = teacher
+        if 'classroom_id' in update_data:
+            classroom = cls._get_resource_by_id(Classroom, update_data['classroom_id'], school, 'Classroom')
+            entry.classroom = classroom
+        if 'subject_id' in update_data:
+            entry.subject = cls._get_resource_by_id(Subject, update_data['subject_id'], school, 'Subject')
+
+        # 2. Business Rule: Re-check conflicts (Excluding the current entry being updated)
+        
+        # Check 2a: Teacher conflict
+        teacher_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time, exclude_id=entry_id).filter(teacher=teacher)
+        if teacher_conflicts.exists():
+            raise BusinessRuleViolation(
+                f"Update failed: Teacher {teacher.last_name} is already booked for an overlapping slot."
+            )
+
+        # Check 2b: Classroom conflict
+        classroom_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time, exclude_id=entry_id).filter(classroom=classroom)
+        if classroom_conflicts.exists():
+            raise BusinessRuleViolation(
+                f"Update failed: Classroom {classroom.room_number} is already booked for an overlapping slot."
+            )
+
+        # 3. Execution (Apply remaining updates and save)
+        entry.day_of_week = day_of_week
+        entry.start_time = start_time
+        entry.end_time = end_time
+        
+        entry.save()
+        
+        return entry
+./service_management/core/services/events_service.py:
+from datetime import datetime
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    Event, EventRegistration, School, Student, Teacher
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError,
+    DuplicateEntryError
+)
+
+class EventsService:
+    """
+    Handles business logic for managing school events, including creation, 
+    registration, and capacity enforcement.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @classmethod
+    @transaction.atomic
+    def create_event(
+        cls, 
+        school_id: int, 
+        title: str, 
+        description: str, 
+        start_time_str: str, 
+        end_time_str: str, 
+        max_capacity: int = 0
+    ) -> Event:
+        """
+        Creates a new school event with defined time and capacity limits.
+        """
+        school = cls._validate_school_context(school_id)
+
+        # 1. Validation: Time and Capacity
+        try:
+            start_time = datetime.fromisoformat(start_time_str)
+            end_time = datetime.fromisoformat(end_time_str)
+        except ValueError:
+            raise ValidationError("Start and end times must be in ISO 8601 format.")
+        
+        if start_time >= end_time:
+            raise BusinessRuleViolation("Event start time must be before the end time.")
+            
+        if start_time < datetime.now():
+            raise BusinessRuleViolation("Cannot create an event in the past.")
+
+        if max_capacity < 0:
+            raise ValidationError("Max capacity cannot be negative.")
+
+        # 2. Execution (Creation)
+        event = Event.objects.create(
+            school=school,
+            title=title,
+            description=description,
+            start_time=start_time,
+            end_time=end_time,
+            max_capacity=max_capacity,
+            current_registrations=0 # Initialized at zero
+        )
+
+        return event
+
+    # --- REGISTRATION LOGIC ---
+
+    @classmethod
+    @transaction.atomic
+    def register_for_event(cls, event_id: int, user_id: int, user_role: str) -> EventRegistration:
+        """
+        Registers a student or teacher for an event, enforcing capacity limits.
+        """
+        event = get_object_or_404(Event, pk=event_id)
+        
+        # 1. Validation: Event Timing and Status
+        if event.end_time < datetime.now():
+            raise BusinessRuleViolation("Event registration is closed as the event has ended.")
+        
+        if not event.is_active:
+            raise BusinessRuleViolation("Event is currently inactive and cannot accept registrations.")
+
+        # 2. Business Rule: Event Registration Limit Check
+        if event.max_capacity > 0 and event.current_registrations >= event.max_capacity:
+            raise BusinessRuleViolation(
+                f"Event Registration Limit Violated: '{event.title}' is full (Max Capacity: {event.max_capacity})."
+            )
+
+        # 3. Validation: User Existence and Role Linkage
+        if user_role == 'Student':
+            try:
+                user_instance = Student.objects.get(pk=user_id, school=event.school)
+            except Student.DoesNotExist:
+                raise ResourceNotFoundError(f"Student ID {user_id} not found.")
+        elif user_role == 'Teacher':
+            try:
+                user_instance = Teacher.objects.get(pk=user_id, school=event.school)
+            except Teacher.DoesNotExist:
+                raise ResourceNotFoundError(f"Teacher ID {user_id} not found.")
+        else:
+            raise ValidationError("Invalid role specified for registration.")
+
+        # 4. Business Rule: Duplicate Registration Check
+        if EventRegistration.objects.filter(event=event, user_role=user_role, user_id=user_id).exists():
+            raise DuplicateEntryError("This user is already registered for this event.")
+
+        # 5. Execution (Creation and Counter Update)
+        registration = EventRegistration.objects.create(
+            event=event,
+            user_role=user_role,
+            user_id=user_id, # Store the actual Student/Teacher primary key here
+            registered_at=datetime.now()
+        )
+        
+        # Safely increment the counter (essential for race condition safety if this were done outside transaction)
+        event.current_registrations = EventRegistration.objects.filter(event=event).count()
+        event.save(update_fields=['current_registrations'])
+        
+        # 6. Side Effect: Confirmation/Ticket Generation
+        # NotificationService.send_event_confirmation(registration)
+
+        return registration
+
+    @classmethod
+    @transaction.atomic
+    def cancel_registration(cls, registration_id: int) -> Event:
+        """
+        Cancels a user's registration and updates the event capacity counter.
+        """
+        registration = get_object_or_404(EventRegistration, pk=registration_id)
+        event = registration.event
+        
+        # 1. Execution (Deletion)
+        registration.delete()
+        
+        
+        event.current_registrations = EventRegistration.objects.filter(event=event).count()
+        event.save(update_fields=['current_registrations'])
+        
+        return event
+./service_management/core/services/parent_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import Parent, Student, School
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError,
+    DuplicateEntryError
+)
+
+class ParentService:
+    """
+    Handles business logic for Parent records, focusing on creation and the 
+    management of parent-student relationships (children).
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _validate_phone_uniqueness(school: School, phone: str):
+        """Checks for uniqueness of the phone number within the school."""
+        if Parent.objects.filter(school=school, phone=phone).exists():
+            raise DuplicateEntryError(
+                f"A parent record with the phone number '{phone}' already exists in this school."
+            )
+
+    @classmethod
+    @transaction.atomic
+    def create_new_parent(cls, school_id: int, parent_data: dict) -> Parent:
+        """
+        Creates a new parent record after validating uniqueness and school context.
+        """
+        # 1. Validation and Resource Retrieval
+        school = cls._validate_school_context(school_id)
+        
+        required_fields = ['first_name', 'last_name', 'phone']
+        for field in required_fields:
+            if not parent_data.get(field):
+                raise ValidationError(f"Missing required field: {field} for parent creation.")
+        
+        phone_number = parent_data['phone']
+        cls._validate_phone_uniqueness(school, phone_number)
+
+        # 2. Execution (Creation)
+        parent = Parent.objects.create(
+            school=school,
+            first_name=parent_data['first_name'],
+            last_name=parent_data['last_name'],
+            phone=phone_number,
+            email=parent_data.get('email'),
+            is_active=True
+        )
+
+        # 3. Side Effect (Optional: Create associated user account/messaging thread)
+        # UserService.create_parent_user(parent)
+        
+        return parent
+
+    @classmethod
+    @transaction.atomic
+    def link_student_to_parent(cls, student_id: int, parent_id: int) -> Student:
+        """
+        Links an existing student to an existing parent.
+        This is typically used if a student's legal guardian changes.
+        """
+        
+        # 1. Fetch Resources
+        student = get_object_or_404(Student, pk=student_id)
+        parent = get_object_or_404(Parent, pk=parent_id)
+        
+        # 2. Validation: Ensure both belong to the same school
+        if student.school_id != parent.school_id:
+            raise BusinessRuleViolation(
+                "Cannot link student and parent from different school contexts."
+            )
+        
+        # 3. Execution (Update)
+        student.parent = parent
+        student.save(update_fields=['parent'])
+        
+        # 4. Side Effect (Audit log)
+        # LogService.log_event(student.school, 'PARENT_LINKAGE_UPDATE', f'Student {student.pk} assigned to new parent {parent.pk}')
+        
+        return student
+
+    @classmethod
+    @transaction.atomic
+    def unlink_student_from_parent(cls, student_id: int) -> Student:
+        """
+        Removes the parent linkage from a student (e.g., in a data migration 
+        or before deletion). This usually requires assigning a 'dummy' or 
+        'system' parent if the field is not null.
+        """
+        student = get_object_or_404(Student, pk=student_id)
+        
+        # Business Rule: Parent linkage is MANDATORY (based on typical Django model ForeignKey constraint)
+        # You would typically raise an error unless the parent is being replaced.
+        # Assuming the parent field is not nullable (PROTECT):
+        
+        raise BusinessRuleViolation(
+            "Student must always have a primary parent. Use 'link_student_to_parent' to reassign."
+        )
+        
+        # If the parent field was nullable, the code would be:
+        # student.parent = None
+        # student.save(update_fields=['parent'])
+        # return student
+./service_management/core/services/inventory_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    CanteenItem, InventoryStock, InventoryTransaction, School
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError
+)
+
+class InventoryService:
+    """
+    Handles business logic for managing all non-library inventory items, 
+    stock levels, and consumption transactions.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @classmethod
+    @transaction.atomic
+    def register_canteen_item(
+        cls, 
+        school_id: int, 
+        name: str, 
+        unit_price: float, 
+        initial_stock: int, 
+        is_available: bool = True
+    ) -> CanteenItem:
+        """
+        Registers a new canteen item and initializes its stock.
+        """
+        school = cls._validate_school_context(school_id)
+
+        # 1. Validation: Price and Stock
+        if unit_price <= 0 or initial_stock < 0:
+            raise ValidationError("Unit price must be positive and initial stock cannot be negative.")
+
+        # 2. Business Rule: Unique Item Name Check (per school)
+        if CanteenItem.objects.filter(school=school, name__iexact=name).exists():
+            raise BusinessRuleViolation(f"Canteen item with name '{name}' already exists.")
+
+        # 3. Execution (Creation)
+        canteen_item = CanteenItem.objects.create(
+            school=school,
+            name=name,
+            unit_price=unit_price,
+            current_stock=initial_stock,
+            is_available=is_available
+        )
+
+        return canteen_item
+
+    # --- STOCK ADJUSTMENT AND CONSUMPTION ---
+
+    @classmethod
+    @transaction.atomic
+    def adjust_stock(
+        cls, 
+        item_id: int, 
+        quantity: int, 
+        transaction_type: str,
+        reason: str,
+        related_user=None,
+    ) -> InventoryTransaction:
+        """
+        Generic function to add or remove stock, creating an auditable transaction record.
+        This enforces the Inventory Stock Constraint upon removal.
+        """
+        item = get_object_or_404(CanteenItem, pk=item_id)
+        
+        # 1. Validation: Quantity and Transaction Type
+        if quantity <= 0:
+            raise ValidationError("Quantity must be positive.")
+            
+        valid_types = dict(InventoryTransaction.TRANSACTION_CHOICES).keys()
+        if transaction_type not in valid_types:
+             raise ValidationError(f"Invalid transaction type. Must be one of {', '.join(valid_types)}")
+
+        # 2. Business Rule: Inventory Stock Constraint (for removal/consumption)
+        if transaction_type == InventoryTransaction.TRANSACTION_TYPE_REMOVAL:
+            if item.current_stock < quantity:
+                raise BusinessRuleViolation(
+                    f"Inventory Stock Constraint Violated: Only {item.current_stock} of '{item.name}' available, cannot remove {quantity}."
+                )
+
+        # 3. Execution (Stock Update)
+        if transaction_type == InventoryTransaction.TRANSACTION_TYPE_ADDITION:
+            item.current_stock += quantity
+            new_balance = item.current_stock
+        else: # REMOVAL (Consumption, wastage, sale)
+            item.current_stock -= quantity
+            new_balance = item.current_stock
+
+        item.save(update_fields=['current_stock'])
+
+        # 4. Create Auditable Transaction Record
+        transaction_record = InventoryTransaction.objects.create(
+            school=item.school,
+            item=item,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            reason=reason,
+            user=related_user,
+            stock_after=new_balance
+        )
+        
+        return transaction_record
+
+    @classmethod
+    @transaction.atomic
+    def process_canteen_sale(cls, item_id: int, quantity: int, student_id: int, user_context=None) -> InventoryTransaction:
+        """
+        Handles a specific type of removal: a sale linked to a student purchase.
+        This would typically be called by the FinanceService after a successful wallet debit.
+        """
+        item = get_object_or_404(CanteenItem, pk=item_id)
+        
+        # 1. Validation: Stock Constraint
+        if item.current_stock < quantity:
+            raise BusinessRuleViolation(
+                f"Cannot process sale: Only {item.current_stock} available, requested {quantity}."
+            )
+
+        # 2. Side Effect: Call Finance Service to handle wallet debit
+        # NOTE: This enforces the constraint that money must be handled FIRST.
+        # total_cost = item.unit_price * quantity
+        # from .finance_service import FinanceService
+        # try:
+        #     FinanceService.process_canteen_purchase(student_id, total_cost, item_id)
+        # except BusinessRuleViolation as e:
+        #     raise e # Re-raise if fund check failed in finance service
+
+        # 3. Execution (Stock Removal)
+        return cls.adjust_stock(
+            item_id=item_id,
+            quantity=quantity,
+            transaction_type=InventoryTransaction.TRANSACTION_TYPE_REMOVAL,
+            reason=f"Sale to Student ID {student_id}",
+            related_user=user_context
+        )
+./service_management/core/services/teacher_service.py:
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import Teacher, Classroom, Subject, School, TeacherSubjectMapping
+from core.services.exceptions import (
+    ValidationError, 
+    ResourceNotFoundError, 
+    BusinessRuleViolation, 
+    DuplicateEntryError
+)
+
+class TeacherService:
+    """
+    Handles business logic for teacher management, focusing on subject and classroom assignments.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _validate_teacher(teacher_id: int, school: School) -> Teacher:
+        """Helper to check if a teacher exists in the school."""
+        try:
+            return Teacher.objects.get(pk=teacher_id, school=school)
+        except Teacher.DoesNotExist:
+            raise ResourceNotFoundError(f"Teacher ID {teacher_id} not found in school {school.pk}.")
+
+    @staticmethod
+    def _validate_subject(subject_id: int, school: School) -> Subject:
+        """Helper to check if a subject exists in the school."""
+        try:
+            return Subject.objects.get(pk=subject_id, school=school)
+        except Subject.DoesNotExist:
+            raise ResourceNotFoundError(f"Subject ID {subject_id} not found in school {school.pk}.")
+
+    @staticmethod
+    def _validate_classroom(classroom_id: int, school: School) -> Classroom:
+        """Helper to check if a classroom exists in the school."""
+        try:
+            return Classroom.objects.get(pk=classroom_id, school=school)
+        except Classroom.DoesNotExist:
+            raise ResourceNotFoundError(f"Classroom ID {classroom_id} not found in school {school.pk}.")
+
+    @classmethod
+    @transaction.atomic
+    def assign_subject_to_classroom(
+        cls, 
+        school_id: int,
+        teacher_id: int, 
+        subject_id: int, 
+        classroom_id: int
+    ) -> TeacherSubjectMapping:
+        """
+        Assigns a specific teacher to teach a subject in a classroom, 
+        ensuring no conflicting assignments exist.
+        """
+        # 1. Validation and Resource Retrieval
+        school = cls._validate_school_context(school_id)
+        teacher = cls._validate_teacher(teacher_id, school)
+        subject = cls._validate_subject(subject_id, school)
+        classroom = cls._validate_classroom(classroom_id, school)
+
+        # 2. Business Rule: Prevent Duplicate Mapping
+        # A specific teacher should not be mapped to the exact same subject and classroom combination twice.
+        if TeacherSubjectMapping.objects.filter(
+            school=school,
+            teacher=teacher,
+            subject=subject,
+            classroom=classroom
+        ).exists():
+            raise DuplicateEntryError(
+                f"Teacher {teacher.last_name} is already assigned to teach {subject.name} in {classroom.grade}-{classroom.section}."
+            )
+            
+        # 3. Business Rule: Prevent Conflicting Teaching Roles
+        # OPTIONAL: Add logic here to prevent a teacher from taking on too many hours 
+        # or too many core subjects (e.g., check against a maximum load constraint).
+        # This often involves checking the TimetableEntry model (which we haven't implemented a service for yet).
+
+        # 4. Execution (Creation)
+        mapping = TeacherSubjectMapping.objects.create(
+            school=school,
+            teacher=teacher,
+            subject=subject,
+            classroom=classroom,
+            is_active=True
+        )
+
+        return mapping
+
+    @classmethod
+    @transaction.atomic
+    def update_homeroom_assignment(cls, teacher_id: int, classroom_id: int) -> Teacher:
+        """
+        Assigns or updates a teacher's homeroom responsibility.
+        """
+        teacher = get_object_or_404(Teacher, pk=teacher_id)
+        school = cls._validate_school_context(teacher.school_id)
+        
+        # 1. Validation: Ensure the classroom is valid
+        new_homeroom = cls._validate_classroom(classroom_id, school)
+        
+        # 2. Business Rule: Prevent multiple homeroom teachers for one class
+        if Classroom.objects.filter(homeroom_teacher=teacher).exclude(pk=new_homeroom.pk).exists():
+            # Remove the teacher from their old homeroom if applicable
+            Classroom.objects.filter(homeroom_teacher=teacher).update(homeroom_teacher=None)
+
+        # 3. Execution
+        new_homeroom.homeroom_teacher = teacher
+        new_homeroom.save(update_fields=['homeroom_teacher'])
+
+        return teacher
+./service_management/core/services/homework_service.py:
+from datetime import date, datetime
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import (
+    Homework, HomeworkSubmission, Teacher, Classroom, Subject, Student, School
+)
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError
+)
+
+class HomeworkService:
+    """
+    Handles business logic for homework management: creation, assignment, 
+    submission, and grading.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _get_resource_by_id(model, pk: int, school: School, resource_name: str):
+        """Generic helper to fetch a resource by ID and school."""
+        try:
+            return model.objects.get(pk=pk, school=school)
+        except model.DoesNotExist:
+            raise ResourceNotFoundError(f"{resource_name} ID {pk} not found in school {school.pk}.")
+
+    # --- ASSIGNMENT CREATION ---
+
+    @classmethod
+    @transaction.atomic
+    def create_assignment(
+        cls, 
+        school_id: int,
+        teacher_id: int, 
+        subject_id: int, 
+        classroom_ids: list[int],
+        title: str,
+        description: str,
+        due_date_str: str,
+        max_marks: float = 10.0
+    ) -> Homework:
+        """
+        Creates a new homework assignment and links it to one or more classrooms.
+        """
+        school = cls._validate_school_context(school_id)
+        teacher = cls._get_resource_by_id(Teacher, teacher_id, school, 'Teacher')
+        subject = cls._get_resource_by_id(Subject, subject_id, school, 'Subject')
+        
+        # 1. Validation: Due Date and Marks
+        try:
+            due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            raise ValidationError("Due date must be in 'YYYY-MM-DD' format.")
+        
+        if due_date <= date.today():
+            raise BusinessRuleViolation("Due date must be a future date.")
+        
+        if max_marks <= 0:
+            raise ValidationError("Maximum marks must be positive.")
+
+        # 2. Validation: Classroom Links
+        classrooms = []
+        for cid in classroom_ids:
+            # Re-use the existing resource fetcher to ensure classroom is valid for the school
+            classrooms.append(cls._get_resource_by_id(Classroom, cid, school, 'Classroom'))
+
+        # 3. Execution (Creation)
+        homework = Homework.objects.create(
+            school=school,
+            teacher=teacher,
+            subject=subject,
+            title=title,
+            description=description,
+            due_date=due_date,
+            max_marks=max_marks
+        )
+        
+        # Link to all specified classrooms
+        homework.classrooms.set(classrooms)
+        
+        # 4. Side Effect: Notification trigger for students/parents in those classrooms
+        # NotificationService.notify_new_homework(homework)
+        
+        return homework
+
+    # --- STUDENT SUBMISSION ---
+
+    @classmethod
+    @transaction.atomic
+    def submit_homework(cls, homework_id: int, student_id: int, submission_data: dict) -> HomeworkSubmission:
+        """
+        Records a student's submission for a specific homework assignment.
+        """
+        homework = get_object_or_404(Homework, pk=homework_id)
+        
+        try:
+            student = Student.objects.get(pk=student_id, school=homework.school)
+        except Student.DoesNotExist:
+            raise ResourceNotFoundError(f"Student ID {student_id} not found in school {homework.school.name}.")
+
+        # 1. Business Rule: Check Enrollment/Assignment
+        if student.classroom not in homework.classrooms.all():
+            raise BusinessRuleViolation(
+                f"Student {student.admission_number} is not assigned this homework."
+            )
+            
+        # 2. Business Rule: Deadline Check
+        if date.today() > homework.due_date:
+            submission_data['is_late'] = True
+        else:
+            submission_data['is_late'] = False
+        
+        # 3. Business Rule: Prevent Multiple Submissions (if submission already exists)
+        if HomeworkSubmission.objects.filter(homework=homework, student=student).exists():
+            # A production system might allow overwriting or create a new versioned submission.
+            # For simplicity, we enforce one submission per student here.
+            raise BusinessRuleViolation("Student has already submitted this homework.")
+
+        # 4. Execution (Creation)
+        submission = HomeworkSubmission.objects.create(
+            homework=homework,
+            student=student,
+            submission_text=submission_data.get('submission_text'),
+            submission_file_url=submission_data.get('submission_file_url'),
+            submitted_at=datetime.now(),
+            is_late=submission_data['is_late']
+        )
+        
+        return submission
+
+    # --- TEACHER GRADING ---
+
+    @classmethod
+    @transaction.atomic
+    def grade_submission(cls, submission_id: int, grader_id: int, marks_obtained: float, feedback: str = None) -> HomeworkSubmission:
+        """
+        Records the marks and feedback for a student's homework submission.
+        """
+        submission = get_object_or_404(HomeworkSubmission, pk=submission_id)
+        homework = submission.homework
+        school = homework.school
+        
+        # 1. Validation: Grader Authorization (Must be the assigning teacher or an authorized admin)
+        grader = cls._get_resource_by_id(StudentManagementUser, grader_id, school, 'User')
+        
+        # Simple check: Grader must be the teacher who assigned the homework
+        if grader.teacher != homework.teacher and not grader.is_admin:
+            raise BusinessRuleViolation("Grader is not authorized to mark this submission.")
+
+        # 2. Validation: Marks Constraint
+        if marks_obtained < 0 or marks_obtained > homework.max_marks:
+            raise ValidationError(
+                f"Marks obtained ({marks_obtained}) must be between 0 and the max marks ({homework.max_marks})."
+            )
+
+        # 3. Execution (Update Submission)
+        submission.marks_obtained = marks_obtained
+        submission.feedback = feedback
+        submission.graded_at = datetime.now()
+        submission.is_graded = True
+        submission.save(update_fields=['marks_obtained', 'feedback', 'graded_at', 'is_graded'])
+        
+        # 4. Side Effect: Notify student/parent of the grade
+        # NotificationService.notify_grade_released(submission)
+
+        return submission
+./service_management/core/services/device_service.py:
+from datetime import datetime
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import ReaderDevice, CollectorNode, DeviceErrorLog, School
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError,
+    DuplicateEntryError
+)
+
+class DeviceService:
+    """
+    Handles business logic for managing Reader Devices and Collector Nodes, 
+    including registration, status updates, and error logging.
+    """
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _validate_mac_address(mac_address: str):
+        """Ensures the MAC address is in a standard format (e.g., AA:BB:CC:DD:EE:FF)."""
+        # Simple length check; a production version would use regex
+        if len(mac_address) not in [12, 17] or ':' not in mac_address:
+            raise ValidationError(f"MAC address '{mac_address}' is not in a recognized format.")
+
+    # --- READER DEVICE MANAGEMENT ---
+
+    @classmethod
+    @transaction.atomic
+    def register_reader_device(cls, school_id: int, mac_address: str, location_type: str, description: str = None) -> ReaderDevice:
+        """
+        Registers a new RFID reader device.
+        """
+        school = cls._validate_school_context(school_id)
+        cls._validate_mac_address(mac_address)
+        
+        # 1. Business Rule: Unique MAC Address Check (per school)
+        if ReaderDevice.objects.filter(school=school, mac_address=mac_address).exists():
+            raise DuplicateEntryError(f"Reader device with MAC address {mac_address} already registered in this school.")
+
+        # 2. Validation: Location Type Check
+        valid_locations = dict(ReaderDevice.LOCATION_CHOICES).keys()
+        if location_type not in valid_locations:
+             raise ValidationError(f"Invalid location type '{location_type}'. Must be one of {', '.join(valid_locations)}")
+
+        # 3. Execution (Creation)
+        device = ReaderDevice.objects.create(
+            school=school,
+            mac_address=mac_address,
+            location_type=location_type,
+            description=description,
+            is_active=True,
+            last_ping_time=datetime.now() # Initialize last ping
+        )
+        return device
+
+    @classmethod
+    @transaction.atomic
+    def update_reader_status(cls, mac_address: str, school_id: int, status_data: dict) -> ReaderDevice:
+        """
+        Updates the operational status, battery, or firmware of an existing reader device.
+        """
+        school = cls._validate_school_context(school_id)
+        
+        # 1. Fetch Device
+        device = get_object_or_404(ReaderDevice, mac_address=mac_address, school=school)
+
+        # 2. Execution (Update Fields)
+        if 'is_active' in status_data:
+            device.is_active = status_data['is_active']
+        if 'battery_level' in status_data:
+            if not 0 <= status_data['battery_level'] <= 100:
+                 raise ValidationError("Battery level must be between 0 and 100.")
+            device.battery_level = status_data['battery_level']
+        
+        device.last_ping_time = datetime.now()
+        device.save()
+        
+        return device
+
+    # --- ERROR LOGGING ---
+
+    @classmethod
+    @transaction.atomic
+    def log_device_error(cls, school_id: int, mac_address: str, error_code: str, severity: str, message: str) -> DeviceErrorLog:
+        """
+        Records a specific error reported by a device or detected by the backend.
+        """
+        school = cls._validate_school_context(school_id)
+        
+        # Find the device (optional, but good for linking)
+        reader_device = ReaderDevice.objects.filter(mac_address=mac_address, school=school).first()
+        collector_node = CollectorNode.objects.filter(mac_address=mac_address, school=school).first()
+
+        # Validation: Check severity level
+        valid_severities = dict(DeviceErrorLog.SEVERITY_CHOICES).keys()
+        if severity not in valid_severities:
+             raise ValidationError(f"Invalid severity '{severity}'. Must be one of {', '.join(valid_severities)}")
+
+        # Execution (Creation)
+        error_log = DeviceErrorLog.objects.create(
+            school=school,
+            mac_address=mac_address,
+            reader_device=reader_device,
+            collector_node=collector_node,
+            error_code=error_code,
+            severity=severity,
+            message=message
+        )
+        
+        # Side Effect: If severity is CRITICAL, disable the device
+        if severity == DeviceErrorLog.SEVERITY_CRITICAL and reader_device:
+            reader_device.is_active = False
+            reader_device.save(update_fields=['is_active'])
+            
+        return error_log
+
+    # --- COLLECTOR NODE MANAGEMENT ---
+
+    @classmethod
+    @transaction.atomic
+    def register_collector_node(cls, school_id: int, mac_address: str, location: str) -> CollectorNode:
+        """
+        Registers a main Collector Node (often a gateway for multiple readers).
+        """
+        school = cls._validate_school_context(school_id)
+        cls._validate_mac_address(mac_address)
+        
+        # 1. Business Rule: Unique MAC Address Check (per school)
+        if CollectorNode.objects.filter(school=school, mac_address=mac_address).exists():
+            raise DuplicateEntryError(f"Collector Node with MAC address {mac_address} already registered.")
+
+        # 2. Execution (Creation)
+        node = CollectorNode.objects.create(
+            school=school,
+            mac_address=mac_address,
+            location=location,
+            is_active=True
+        )
+        return node
+./service_management/core/services/library_service.py:
+from datetime import date, timedelta
+import datetime
+from django.db import transaction
+from django.shortcuts import get_object_or_404
+from student_management.models import Student, Book, BookIssue, School
+from core.services.exceptions import (
+    ValidationError, 
+    BusinessRuleViolation, 
+    ResourceNotFoundError,
+    ObjectNotActiveError
+)
+
+class LibraryService:
+    """
+    Handles business logic and constraints for book issuance and returns, 
+    including stock management and borrowing limits.
+    """
+
+    MAX_BOOKS_PER_STUDENT = 1
+    DEFAULT_ISSUE_PERIOD_DAYS = 7
+    FINE_PER_DAY = 0.50  # Fine amount in currency unit (e.g., USD, INR)
+
+    @staticmethod
+    def _validate_school_context(school_id: int) -> School:
+        """Helper to ensure the school context is valid and active."""
+        try:
+            return School.objects.get(pk=school_id, is_active=True)
+        except School.DoesNotExist:
+            raise ResourceNotFoundError(f"School with ID {school_id} not found or is inactive.")
+
+    @staticmethod
+    def _validate_student_can_borrow(student: Student):
+        """Checks if a student is eligible to borrow a book based on rules."""
+        
+        # Check 1: Enrollment status
+        if not student.is_fully_enrolled:
+            raise ObjectNotActiveError("Student is not fully enrolled/is inactive and cannot borrow books.")
+
+        # Check 2: Overdue books check (Strict Policy: Cannot borrow with any overdue books)
+        overdue_issues = BookIssue.objects.filter(
+            student=student, 
+            returned_at__isnull=True, 
+            due_date__lt=date.today()
+        ).count()
+        if overdue_issues > 0:
+            raise BusinessRuleViolation(
+                f"Student has {overdue_issues} book(s) overdue. Please return them before borrowing more."
+            )
+
+        # Check 3: Maximum issue limit check
+        current_issues = BookIssue.objects.filter(
+            student=student, 
+            returned_at__isnull=True
+        ).count()
+        if current_issues >= LibraryService.MAX_BOOKS_PER_STUDENT:
+            raise BusinessRuleViolation(
+                f"Student has reached the maximum borrowing limit ({LibraryService.MAX_BOOKS_PER_STUDENT} books)."
+            )
+
+    @classmethod
+    @transaction.atomic
+    def issue_book(cls, student_id: int, book_id: int, issuer_user=None) -> BookIssue:
+        """
+        Issues a book to a student after validating all borrowing rules and updating stock.
+        """
+        # 1. Fetch Resources
+        try:
+            student = Student.objects.select_related('school').get(pk=student_id)
+        except Student.DoesNotExist:
+            raise ResourceNotFoundError(f"Student ID {student_id} not found.")
+
+        # Validate school context via the student's school
+        cls._validate_school_context(student.school_id)
+        
+        try:
+            book = Book.objects.get(pk=book_id, school=student.school)
+        except Book.DoesNotExist:
+            raise ResourceNotFoundError(f"Book ID {book_id} not found in school {student.school.name}.")
+
+        # 2. Validation
+        cls._validate_student_can_borrow(student)
+
+        # Check 4: Book stock constraint check
+        if book.current_stock <= 0:
+            raise BusinessRuleViolation(f"Book '{book.title}' is currently out of stock.")
+            
+        # Check 5: Prevent re-issuing the exact same book that is currently checked out to this student (optional check)
+        if BookIssue.objects.filter(student=student, book=book, returned_at__isnull=True).exists():
+            raise BusinessRuleViolation("This book is already checked out by this student.")
+
+        # 3. Execution (Stock Update and Creation)
+        book.current_stock -= 1
+        book.save(update_fields=['current_stock'])
+
+        due_date = date.today() + timedelta(days=cls.DEFAULT_ISSUE_PERIOD_DAYS)
+
+        book_issue = BookIssue.objects.create(
+            student=student,
+            book=book,
+            school=student.school,
+            issued_by=issuer_user, # User performing the action (e.g., Teacher or Librarian)
+            due_date=due_date
+        )
+
+        return book_issue
+    
+    @classmethod
+    @transaction.atomic
+    def return_book(cls, book_issue_id: int, receiver_user=None) -> tuple[BookIssue, float]:
+        """
+        Processes a book return, calculates fines, and updates stock.
+        Returns the updated BookIssue and the calculated fine amount.
+        """
+        book_issue = get_object_or_404(
+            BookIssue, 
+            pk=book_issue_id, 
+            returned_at__isnull=True
+        )
+        
+        # 1. Fine Calculation
+        fine_amount = 0.0
+        is_overdue = book_issue.due_date < date.today()
+        
+        if is_overdue:
+            overdue_days = (date.today() - book_issue.due_date).days
+            fine_amount = overdue_days * cls.FINE_PER_DAY
+        
+        # 2. Execution (Update)
+        book_issue.returned_at = datetime.now()
+        book_issue.received_by = receiver_user
+        book_issue.fine_amount = fine_amount
+        book_issue.save(update_fields=['returned_at', 'received_by', 'fine_amount'])
+        
+        # 3. Update Stock
+        book = book_issue.book
+        book.current_stock += 1
+        book.save(update_fields=['current_stock'])
+
+        # 4. Side Effect: If fine exists, create a record for the Finance service
+        # if fine_amount > 0:
+        #     # This would interface with the FinanceService (next task)
+        #     from .finance_service import FinanceService
+        #     FinanceService.create_library_fine(book_issue.student, fine_amount, book_issue)
+
+        return book_issue, fine_amount
+./service_management/student_management/asgi.py:
+import os
+from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+import student_management.routing
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "service_management.settings")
+
+django_asgi_app = get_asgi_application()
+
+application = ProtocolTypeRouter({
+    "http": django_asgi_app,
+    "websocket": AuthMiddlewareStack(
+        URLRouter(
+            student_management.routing.websocket_urlpatterns
+        )
+    ),
+})
+
+./service_management/student_management/routing.py:
+from django.urls import re_path
+from .consumers import LiveAttendanceConsumer
+
+websocket_urlpatterns = [
+    re_path(
+        r"^ws/attendance/(?P<school_id>\d+)/$",
+        LiveAttendanceConsumer.as_asgi()
+    ),
+]
+
+./service_management/student_management/admin.py:
+# service_management/student_management/admin.py (FINAL, ROBUST FIX)
+
+from django.contrib import admin
+# We need to import forms and the base UserAdmin
+from django import forms 
+from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+
+from .models import (
+    # Custom User Model
+    StudentManagementUser, 
+    # Core Tenancy and Structure
+    School, 
+    Classroom, 
+    # Profile Models
+    Teacher, 
+    Parent, 
+    Student,
+    # RFID/Attendance
+    TapLog, 
+    AttendanceRecord,
+    RFIDCard,
+    # Timetable/Subjects
+    Subject,
+    TeacherSubjectMapping, 
+    TimetableEntry,
+    # Communications
+    Announcement,
+    MessageThread,
+    Message,
+    # Financial/Canteen
+    CanteenItem,
+    Wallet,
+    WalletTransaction,
+)
+
+# ----------------------------------------------------
+# 1. Custom User Forms (NEW CRITICAL ADDITION)
+# ----------------------------------------------------
+
+# Form used when editing an existing user (Change View)
+class StudentManagementUserChangeForm(forms.ModelForm):
+    class Meta:
+        model = StudentManagementUser
+        # Use all fields for simplicity, or explicitly list them (excluding 'username')
+        fields = '__all__'
+        
+# Form used when creating a new user (Add User page)
+# This explicitly defines the fields and excludes 'username'
+class StudentManagementUserCreationForm(forms.ModelForm):
+    # These fields are required by the BaseUserAdmin add_view logic
+    password = forms.CharField(label='Password', widget=forms.PasswordInput)
+    password2 = forms.CharField(label='Password confirmation', widget=forms.PasswordInput)
+
+    class Meta:
+        model = StudentManagementUser
+        # IMPORTANT: Use only the fields present in your custom model (StudentManagementUser)
+        fields = ('email', 'first_name', 'last_name', 'role', 'school')
+
+    def clean_password2(self):
+        # Basic password confirmation check
+        password = self.cleaned_data.get('password')
+        password2 = self.cleaned_data.get('password2')
+        if password and password2 and password != password2:
+            raise forms.ValidationError("Passwords don't match.")
+        return password2
+        
+# ----------------------------------------------------
+# 2. Custom User Admin Class
+# ----------------------------------------------------
+
+class CustomUserAdmin(BaseUserAdmin):
+    """Admin configuration for the custom user model."""
+    
+    # *** CRITICAL: Assign the custom forms to override BaseUserAdmin's defaults ***
+    form = StudentManagementUserChangeForm
+    add_form = StudentManagementUserCreationForm
+
+    list_display = ('email', 'first_name', 'last_name', 'role', 'school', 'is_staff')
+    search_fields = ('email', 'first_name', 'last_name')
+    ordering = ('email',)
+    
+    # 1. Fieldsets for the 'CHANGE' view (Editing existing user)
+    fieldsets = (
+        (None, {'fields': ('email', 'password')}), 
+        ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
+        ('Permissions', {
+            'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions'),
+        }),
+        ('Important dates', {'fields': ('last_login', 'date_joined')}),
+    )
+
+    # 2. Fieldsets for the 'ADD' view (Creating a new user)
+    # This must still be defined, but now it references fields from the add_form
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            # Note: Fields here must match fields defined in StudentManagementUserCreationForm
+            'fields': ('email', 'password', 'password2'), 
+        }),
+        ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser')}), 
+    )
+
+# Inline models for quick access
+class StudentInline(admin.StackedInline):
+    model = Student
+    can_delete = False
+    verbose_name_plural = 'Student Profile'
+    
+class TeacherInline(admin.StackedInline):
+    model = Teacher
+    can_delete = False
+    verbose_name_plural = 'Teacher Profile'
+
+class ParentInline(admin.StackedInline):
+    model = Parent
+    can_delete = False
+    verbose_name_plural = 'Parent Profile'
+    
+class StudentManagementUserAdmin(CustomUserAdmin):
+    """Main registration for the User model with inlines"""
+    inlines = [StudentInline, TeacherInline, ParentInline] 
+
+admin.site.register(StudentManagementUser, StudentManagementUserAdmin)
+
+
+# ----------------------------------------------------
+# 3. Core Structure Admin (Registrations)
+# ----------------------------------------------------
+
+@admin.register(School)
+class SchoolAdmin(admin.ModelAdmin):
+    list_display = ('name', 'slug', 'is_active')
+    prepopulated_fields = {'slug': ('name',)}
+
+@admin.register(Classroom)
+class ClassroomAdmin(admin.ModelAdmin):
+    list_display = ('school', 'grade', 'section', 'class_teacher', 'room_number')
+    list_filter = ('school', 'grade')
+    search_fields = ('grade', 'section')
+
+@admin.register(Teacher)
+class TeacherAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'subject_specialization', 'is_active')
+    search_fields = ('last_name', 'first_name')
+    list_filter = ('school', 'subject_specialization')
+    
+@admin.register(Parent)
+class ParentAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'relation')
+    search_fields = ('last_name', 'first_name')
+
+@admin.register(Student)
+class StudentAdmin(admin.ModelAdmin):
+    list_display = ('last_name', 'first_name', 'classroom', 'roll_number', 'rfid_uid', 'is_active')
+    list_filter = ('school', 'classroom', 'is_active')
+    search_fields = ('last_name', 'rfid_uid', 'admission_number')
+
+
+# ----------------------------------------------------
+# 4. RFID/Attendance Admin
+# ----------------------------------------------------
+
+@admin.register(TapLog)
+class TapLogAdmin(admin.ModelAdmin):
+    list_display = ('rfid_uid', 'timestamp', 'direction', 'device_id', 'school')
+    list_filter = ('school', 'direction')
+    search_fields = ('rfid_uid', 'device_id')
+    readonly_fields = ('timestamp', 'raw_data')
+
+@admin.register(AttendanceRecord)
+class AttendanceRecordAdmin(admin.ModelAdmin):
+    list_display = ('student', 'date', 'status', 'tap_timestamp', 'source')
+    list_filter = ('school', 'status', 'date')
+    search_fields = ('student__last_name',)
+    date_hierarchy = 'date'
+
+@admin.register(RFIDCard)
+class RFIDCardAdmin(admin.ModelAdmin):
+    list_display = ('uid', 'status', 'assigned_to_student', 'assigned_to_teacher', 'issued_at')
+    list_filter = ('school', 'status')
+    search_fields = ('uid',)
+    
+# ----------------------------------------------------
+# 5. Timetable/Subjects Admin
+# ----------------------------------------------------
+
+@admin.register(Subject)
+class SubjectAdmin(admin.ModelAdmin):
+    list_display = ('name', 'code', 'school')
+    list_filter = ('school',)
+
+@admin.register(TeacherSubjectMapping)
+class TeacherSubjectMappingAdmin(admin.ModelAdmin):
+    list_display = ('teacher', 'subject', 'classroom', 'is_active')
+    list_filter = ('school', 'is_active')
+
+@admin.register(TimetableEntry)
+class TimetableEntryAdmin(admin.ModelAdmin):
+    list_display = ('classroom', 'day_of_week', 'period_number', 'subject', 'teacher')
+    list_filter = ('school', 'day_of_week', 'classroom')
+    list_editable = ('teacher',)
+
+# ----------------------------------------------------
+# 6. Communication/Other Admin
+# ----------------------------------------------------
+
+@admin.register(Announcement)
+class AnnouncementAdmin(admin.ModelAdmin):
+    list_display = ('title', 'scope', 'classroom', 'created_by')
+    list_filter = ('scope', 'school')
+
+@admin.register(Wallet)
+class WalletAdmin(admin.ModelAdmin):
+    list_display = ('student', 'balance', 'updated_at')
+    search_fields = ('student__last_name',)
+    list_filter = ('school',)
+
+@admin.register(WalletTransaction)
+class WalletTransactionAdmin(admin.ModelAdmin):
+    list_display = ('wallet', 'type', 'amount', 'timestamp')
+    list_filter = ('type', 'school')
+
+@admin.register(MessageThread)
+class MessageThreadAdmin(admin.ModelAdmin):
+    list_display = ('student', 'teacher', 'created_at')
+    list_filter = ('school',)
+./service_management/student_management/models.py:
+# service_management/student_management/models.py (FINAL CORRECTED VERSION)
+
+from django.db import models
+# Import necessary classes for custom user
+from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager 
+from django.utils import timezone 
+from django.utils.translation import gettext_lazy as _ 
+
+# --- Utility Choices ---
+GENDER_CHOICES = [('M', 'Male'), ('F', 'Female'), ('O', 'Other')]
+RELATION_CHOICES = [('MOTHER', 'Mother'), ('FATHER', 'Father'), ('GUARDIAN', 'Guardian')]
+CARD_STATUS_CHOICES = [('ACTIVE', 'Active'), ('LOST', 'Lost'), ('DAMAGED', 'Damaged')]
+ATTENDANCE_STATUS_CHOICES = [('PRESENT', 'Present'), ('ABSENT', 'Absent'), ('OUT', 'Out of School'), ('LATE', 'Late Arrival')]
+TAP_DIRECTION_CHOICES = [('IN', 'In'), ('OUT', 'Out')]
+TAP_SOURCE_CHOICES = [('RFID', 'RFID Tap'), ('MANUAL', 'Manual Entry')]
+TRANSACTION_TYPE_CHOICES = [('CREDIT', 'Credit (Deposit)'), ('DEBIT', 'Debit (Purchase/Fee)')]
+DEVICE_STATUS_CHOICES = [('ONLINE', 'Online'), ('OFFLINE', 'Offline'), ('ERROR', 'Error')]
+DEVICE_TYPE_CHOICES = [('GATE', 'Main Gate Reader'), ('LIBRARY', 'Library Scanner'), ('CANTEEN', 'Canteen POS'), ('BUS', 'Bus Scanner')]
+ERROR_SEVERITY_CHOICES = [('LOW', 'Low'), ('MEDIUM', 'Medium'), ('HIGH', 'High'), ('CRITICAL', 'Critical')]
+# ---
+
+# =========================================================================
+# 1. CORE TENANCY MODEL
+# =========================================================================
+
+class School(models.Model):
+    """The top-level organizational unit for multi-tenancy."""
+    name = models.CharField(max_length=255, unique=True)
+    slug = models.SlugField(max_length=100, unique=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        verbose_name = "School Tenant"
+        verbose_name_plural = "School Tenants"
+
+    def __str__(self):
+        return self.name
+
+# =========================================================================
+# 2. AUTH / CUSTOM USER MODEL 
+# =========================================================================
+
+class StudentManagementUserManager(BaseUserManager):
+    """Custom user model manager where email is the unique identifier."""
+    # Note: The school parameter is optional for create_superuser for bootstrapping.
+    def create_user(self, email, password, school=None, role='Student', **extra_fields):
+        if not email:
+            raise ValueError(_('The Email must be set'))
+        if not school:
+            # Handle case where school is not provided (e.g., during superuser creation)
+            try:
+                school = School.objects.get(slug='default-school')
+            except School.DoesNotExist:
+                raise ValueError(_('Users must be associated with a school and the default school does not exist.'))
+        
+        email = self.normalize_email(email)
+        user = self.model(email=email, school=school, role=role, **extra_fields)
+        user.set_password(password)
+        user.save(using=self._db) # Use save(using=self._db)
+        return user
+
+    def create_superuser(self, email, password, **extra_fields):
+        extra_fields.setdefault('is_staff', True)
+        extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('role', 'Admin')
+
+        if extra_fields.get('is_staff') is not True:
+            raise ValueError(_('Superuser must have is_staff=True.'))
+        if extra_fields.get('is_superuser') is not True:
+            raise ValueError(_('Superuser must have is_superuser=True.'))
+        
+        # Superuser creation requires a school instance, create it if it doesn't exist.
+        school, created = School.objects.get_or_create(
+            slug='default-school', defaults={'name': 'Default School', 'is_active': True}
+        )
+        # Ensure create_user is called with the found/created school
+        return self.create_user(email, password, school=school, role='Admin', **extra_fields)
+
+
+class StudentManagementUser(AbstractBaseUser, PermissionsMixin):
+    """
+    Custom user model supporting different roles (Student, Teacher, Parent, Admin).
+    """
+    ROLE_CHOICES = [
+        ('Student', 'Student'),
+        ('Teacher', 'Teacher'),
+        ('Parent', 'Parent'),
+        ('Admin', 'Admin'),
+        ('Staff', 'Staff'),
+    ]
+
+    email = models.EmailField(_('email address'), unique=True)
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    is_staff = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    date_joined = models.DateTimeField(default=timezone.now)
+    # Role is now directly on the user model
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='Student') 
+    
+    # All users must belong to a school
+    school = models.ForeignKey(School, on_delete=models.PROTECT, related_name='users') 
+
+    objects = StudentManagementUserManager()
+
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['first_name', 'last_name', 'school']
+
+    class Meta:
+        verbose_name = 'User'
+        verbose_name_plural = 'Users'
+        
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} ({self.role})"
+
+
+# =========================================================================
+# 3. SCHOOL STRUCTURE MODELS (Linking profiles to the custom user)
+# =========================================================================
+
+class Teacher(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='teachers') 
+    # Link to custom user model 
+    user = models.OneToOneField(
+        StudentManagementUser, on_delete=models.CASCADE, related_name='teacher_profile', 
+        null=True, blank=True, limit_choices_to={'role': 'Teacher'}
+    )
+    
+    first_name = models.CharField(max_length=100) 
+    last_name = models.CharField(max_length=100)  
+    subject_specialization = models.CharField(max_length=100)
+    photo_url = models.URLField(max_length=200, blank=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        ordering = ['last_name']
+
+    def __str__(self):
+        return f"Teacher: {self.last_name}"
+
+class Classroom(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='classrooms') 
+    
+    grade = models.IntegerField()
+    section = models.CharField(max_length=10)
+    class_teacher = models.ForeignKey(
+        'Teacher', on_delete=models.SET_NULL, null=True, blank=True, related_name='homeroom_class'
+    )
+    room_number = models.CharField(max_length=10)
+
+    class Meta:
+        unique_together = ('school', 'grade', 'section')
+        ordering = ['grade', 'section']
+
+    def __str__(self):
+        return f"Grade {self.grade} - {self.section}"
+
+class Parent(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='parents')
+    # Link to custom user model 
+    user = models.OneToOneField(
+        StudentManagementUser, on_delete=models.CASCADE, related_name='parent_profile', 
+        null=True, blank=True, limit_choices_to={'role': 'Parent'}
+    )
+
+    first_name = models.CharField(max_length=100) 
+    last_name = models.CharField(max_length=100)  
+    relation = models.CharField(max_length=20, choices=RELATION_CHOICES)
+    
+    class Meta:
+        ordering = ['last_name']
+
+    def __str__(self):
+        return f"Parent: {self.last_name}"
+
+class Student(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='students')
+    # Link to custom user model
+    user = models.OneToOneField(
+        StudentManagementUser, on_delete=models.PROTECT, related_name='student_profile', 
+        null=True, blank=True, limit_choices_to={'role': 'Student'}
+    )
+    
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    dob = models.DateField()
+    roll_number = models.IntegerField() 
+    is_fully_enrolled = models.BooleanField(default=False)
+    
+    classroom = models.ForeignKey(Classroom, on_delete=models.PROTECT, related_name='students')
+    # Parent FK is to the Parent Profile model
+    parent = models.ForeignKey(Parent, on_delete=models.PROTECT, related_name='children')
+    
+    photo_url = models.URLField(max_length=200, blank=True)
+    gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
+    blood_group = models.CharField(max_length=5, blank=True)
+    
+    rfid_uid = models.CharField(max_length=50, db_index=True) 
+    admission_number = models.CharField(max_length=50)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        unique_together = [('school', 'admission_number'), ('school', 'rfid_uid')]
+        ordering = ['roll_number']
+
+    def __str__(self):
+        return f"R.No {self.roll_number} - {self.last_name}"
+
+# Missing model required by TeacherService
+class TeacherSubjectMapping(models.Model):
+    """Maps a Teacher to a Subject in a specific Classroom."""
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='teacher_subject_mappings')
+    teacher = models.ForeignKey('Teacher', on_delete=models.CASCADE)
+    subject = models.ForeignKey('Subject', on_delete=models.CASCADE) 
+    classroom = models.ForeignKey('Classroom', on_delete=models.CASCADE)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ('teacher', 'subject', 'classroom')
+        verbose_name = "Teacher Subject Mapping"
+        verbose_name_plural = "Teacher Subject Mappings"
+
+# =========================================================================
+# 4. RFID SYSTEM MODELS
+# ... (all other models remain the same)
+# =========================================================================
+
+class RFIDCard(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='rfid_cards')
+    
+    uid = models.CharField(max_length=20, db_index=True)
+    
+    assigned_to_student = models.ForeignKey(
+        Student, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_card'
+    )
+    assigned_to_teacher = models.ForeignKey(
+        Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_card'
+    )
+    issued_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=CARD_STATUS_CHOICES, default='ACTIVE')
+    
+    class Meta:
+        unique_together = ('school', 'uid')
+        ordering = ['uid']
+
+    def __str__(self):
+        return f"Card {self.uid} ({self.status})"
+
+class TapLog(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='tap_logs') 
+    
+    rfid_uid = models.CharField(max_length=50, db_index=True)
+    timestamp = models.DateTimeField()
+    device_id = models.CharField(max_length=100)
+    direction = models.CharField(max_length=5, choices=TAP_DIRECTION_CHOICES)
+    raw_data = models.JSONField(default=dict)
+
+    class Meta:
+        verbose_name = "Raw Tap Log"
+        verbose_name_plural = "Raw Tap Logs"
+        ordering = ['-timestamp']
+
+# =========================================================================
+# 5. TIMETABLE MODELS
+# =========================================================================
+
+class Subject(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='subjects') 
+    
+    name = models.CharField(max_length=100)
+    code = models.CharField(max_length=10)
+    
+    class Meta:
+        verbose_name = "Academic Subject"
+        verbose_name_plural = "Academic Subjects"
+        unique_together = ('school', 'name', 'code')
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+class TimetableEntry(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='timetable_entries') 
+    
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='timetable_entries')
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name='timetable_entries')
+    teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='timetable_entries')
+    
+    day_of_week = models.IntegerField(choices=[(i, f'Day {i}') for i in range(7)])
+    period_number = models.IntegerField()
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    room = models.CharField(max_length=10, null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Timetable Entry"
+        verbose_name_plural = "Timetable Entries"
+        unique_together = ('classroom', 'day_of_week', 'period_number')
+        ordering = ['classroom', 'day_of_week', 'period_number']
+
+    def __str__(self):
+        return f"{self.classroom.grade}-{self.classroom.section} | {self.subject.code} | Day {self.day_of_week}"
+
+# =========================================================================
+# 6. ATTENDANCE MODELS
+# =========================================================================
+
+class AttendanceRecord(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='attendance_records') 
+    
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='attendance_records')
+    date = models.DateField(db_index=True)
+    period_number = models.IntegerField(null=True, blank=True)
+    
+    status = models.CharField(max_length=10, choices=ATTENDANCE_STATUS_CHOICES)
+    
+    tap_timestamp = models.DateTimeField(null=True, blank=True)
+    source = models.CharField(max_length=10, choices=TAP_SOURCE_CHOICES, default='MANUAL')
+    verified_by_teacher = models.BooleanField(default=False)
+    
+    class Meta:
+        verbose_name = "Attendance Record"
+        unique_together = ('student', 'date', 'period_number')
+        ordering = ['-date', 'student__last_name']
+
+class PracticeOutRecord(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='practice_out_records') 
+    
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='practice_out_records')
+    requested_by_teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='requested_out_records')
+    approved_by_class_teacher = models.ForeignKey(Teacher, on_delete=models.PROTECT, related_name='approved_out_records', 
+                                                  limit_choices_to={'is_active': True}) 
+    date = models.DateField()
+    start_period = models.IntegerField()
+    end_period = models.IntegerField()
+    reason = models.CharField(max_length=255)
+
+    class Meta:
+        verbose_name = "Practice Out Record"
+        verbose_name_plural = "Practice Out Records"
+        ordering = ['-date']
+
+# =========================================================================
+# 7. HOMEWORK MODELS
+# =========================================================================
+
+class Homework(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='homework_assignments') 
+    
+    teacher = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, related_name='assigned_homework')
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='homework_assignments')
+    subject = models.ForeignKey(Subject, on_delete=models.CASCADE, related_name='homework_assignments')
+    
+    title = models.CharField(max_length=200)
+    description = models.TextField()
+    due_date = models.DateTimeField()
+    attachment_url = models.URLField(max_length=500, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        verbose_name = "Homework Assignment"
+        verbose_name_plural = "Homework Assignments"
+        ordering = ['-due_date']
+
+class HomeworkSubmission(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='homework_submissions') 
+    
+    homework = models.ForeignKey(Homework, on_delete=models.CASCADE, related_name='submissions')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='homework_submissions')
+    
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    file_url = models.URLField(max_length=500, null=True, blank=True)
+    remarks = models.TextField(null=True, blank=True)
+    
+    class Meta:
+        verbose_name = "Homework Submission"
+        verbose_name_plural = "Homework Submissions"
+        unique_together = ('homework', 'student')
+
+# =========================================================================
+# 8. COMMUNICATION MODELS
+# =========================================================================
+
+class Announcement(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='announcements') 
+    
+    SCOPE_CHOICES = [('SCHOOL', 'School-wide'), ('CLASS', 'Specific Class'), ('TEACHER', 'Teacher Announcement')]
+    
+    title = models.CharField(max_length=255)
+    body = models.TextField()
+    scope = models.CharField(max_length=10, choices=SCOPE_CHOICES, default='SCHOOL')
+    
+    classroom = models.ForeignKey(Classroom, on_delete=models.SET_NULL, null=True, blank=True, related_name='announcements')
+    # Link to Teacher model
+    created_by = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, related_name='posted_announcements')
+    created_at = models.DateTimeField(auto_now_add=True)
+    attachment_url = models.URLField(max_length=500, null=True, blank=True)
+    
+    class Meta:
+        verbose_name = "School Announcement"
+        verbose_name_plural = "School Announcements"
+        ordering = ['-created_at']
+
+class MessageThread(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='message_threads') 
+    
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='communication_threads')
+    teacher = models.ForeignKey(Teacher, on_delete=models.CASCADE, related_name='communication_threads')
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Message Thread"
+        verbose_name_plural = "Message Threads"
+        unique_together = ('student', 'teacher')
+        ordering = ['-created_at']
+
+class Message(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='messages') 
+    
+    thread = models.ForeignKey(MessageThread, on_delete=models.CASCADE, related_name='messages')
+    # Use CharField for sender_id based on original intent, though User ForeignKey is recommended.
+    sender_id = models.CharField(max_length=50) 
+    
+    message_text = models.TextField()
+    timestamp = models.DateTimeField(auto_now_add=True)
+    attachment_url = models.URLField(max_length=500, null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Message"
+        verbose_name_plural = "Messages"
+        ordering = ['timestamp']
+
+# =========================================================================
+# 9. CANTEEN/FINANCIAL MODELS
+# =========================================================================
+
+class CanteenItem(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='canteen_items') 
+    
+    name = models.CharField(max_length=100)
+    price = models.DecimalField(max_digits=6, decimal_places=2)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = "Canteen Item"
+        verbose_name_plural = "Canteen Items"
+        unique_together = ('school', 'name')
+        ordering = ['name']
+
+    def __str__(self):
+        return f"{self.name} (${self.price})"
+
+class Wallet(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='wallets') 
+    
+    student = models.OneToOneField(Student, on_delete=models.CASCADE, primary_key=True, related_name='wallet')
+    balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Student Wallet"
+        verbose_name_plural = "Student Wallets"
+
+    def __str__(self):
+        return f"Wallet for {self.student.last_name}: ${self.balance}"
+
+class WalletTransaction(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='wallet_transactions') 
+    
+    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name='transactions')
+    timestamp = models.DateTimeField(auto_now_add=True)
+    
+    type = models.CharField(max_length=6, choices=TRANSACTION_TYPE_CHOICES)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    item = models.ForeignKey(CanteenItem, on_delete=models.SET_NULL, null=True, blank=True)
+    description = models.CharField(max_length=255, null=True, blank=True) 
+
+    class Meta:
+        verbose_name = "Wallet Transaction"
+        verbose_name_plural = "Wallet Transactions"
+        ordering = ['-timestamp']
+
+# =========================================================================
+# 10. LIBRARY SYSTEM MODELS
+# =========================================================================
+
+class Book(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='library_books') 
+    
+    title = models.CharField(max_length=255)
+    author = models.CharField(max_length=255)
+    isbn = models.CharField(max_length=20, null=True, blank=True)
+    category = models.CharField(max_length=100)
+    rack = models.CharField(max_length=20) 
+    copies_total = models.PositiveIntegerField(default=1)
+    copies_available = models.PositiveIntegerField(default=1) 
+
+    class Meta:
+        verbose_name = "Library Book"
+        verbose_name_plural = "Library Books"
+        unique_together = ('school', 'isbn')
+        ordering = ['title']
+
+    def __str__(self):
+        return self.title
+
+class BookIssue(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='book_issues') 
+    
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='issued_books')
+    book = models.ForeignKey(Book, on_delete=models.PROTECT, related_name='issue_records')
+    
+    issued_at = models.DateField(auto_now_add=True)
+    due_date = models.DateField()
+    returned_at = models.DateField(null=True, blank=True)
+    
+    fine_amount = models.DecimalField(max_digits=6, decimal_places=2, default=0.00)
+
+    class Meta:
+        verbose_name = "Book Issue Record"
+        verbose_name_plural = "Book Issue Records"
+        ordering = ['-issued_at']
+
+# =========================================================================
+# 11. EVENT & COMPETITION MODELS
+# =========================================================================
+
+class Event(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='events') 
+    
+    name = models.CharField(max_length=255)
+    description = models.TextField()
+    date = models.DateField()
+    category = models.CharField(max_length=100)
+    class_limit = models.ForeignKey(Classroom, on_delete=models.SET_NULL, null=True, blank=True)
+    attachment_url = models.URLField(max_length=500, null=True, blank=True)
+    
+    class Meta:
+        verbose_name = "School Event"
+        verbose_name_plural = "School Events"
+        ordering = ['date']
+
+    def __str__(self):
+        return self.name
+
+class EventRegistration(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='event_registrations') 
+    
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='registrations')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='event_registrations')
+    
+    REGISTER_STATUS_CHOICES = [('ACCEPTED', 'Accepted'), ('REJECTED', 'Rejected'), ('WAITLIST', 'Waitlist')]
+    registered_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=10, choices=REGISTER_STATUS_CHOICES, default='ACCEPTED')
+
+    class Meta:
+        verbose_name = "Event Registration"
+        verbose_name_plural = "Event Registrations"
+        unique_together = ('event', 'student')
+        ordering = ['registered_at']
+
+class Certificate(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='certificates') 
+    
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='certificates')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='certificates_awarded')
+    
+    certificate_url = models.URLField(max_length=500) 
+    generated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Award Certificate"
+        verbose_name_plural = "Award Certificates"
+        unique_together = ('event', 'student')
+
+# =========================================================================
+# 12. EXAMS & MARKS MODELS
+# =========================================================================
+
+class Exam(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='exams') 
+    
+    name = models.CharField(max_length=100)
+    term = models.CharField(max_length=50)
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='exams')
+    start_date = models.DateField()
+    end_date = models.DateField()
+
+    class Meta:
+        verbose_name = "Academic Exam"
+        verbose_name_plural = "Academic Exams"
+        unique_together = ('school', 'name', 'classroom')
+        ordering = ['start_date']
+
+class ExamSubject(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='exam_subjects') 
+    
+    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name='exam_subjects')
+    subject = models.ForeignKey(Subject, on_delete=models.PROTECT, related_name='exam_subjects')
+    
+    max_marks = models.PositiveIntegerField()
+    exam_date = models.DateField()
+
+    class Meta:
+        verbose_name = "Exam Subject Detail"
+        verbose_name_plural = "Exam Subject Details"
+        unique_together = ('exam', 'subject')
+
+class MarkEntry(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='mark_entries') 
+    
+    exam_subject = models.ForeignKey(ExamSubject, on_delete=models.CASCADE, related_name='mark_entries')
+    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='marks_records')
+    
+    marks_obtained = models.DecimalField(max_digits=5, decimal_places=2)
+    remarks = models.TextField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Mark Entry"
+        verbose_name_plural = "Mark Entries"
+        unique_together = ('exam_subject', 'student')
+
+# =========================================================================
+# 13. DEVICE MANAGEMENT & ANALYTICS
+# =========================================================================
+
+class CollectorNode(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='collector_nodes') 
+    
+    floor_number = models.IntegerField(null=True, blank=True)
+    mac_address = models.CharField(max_length=17, unique=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=DEVICE_STATUS_CHOICES, default='OFFLINE')
+    last_heartbeat = models.DateTimeField(null=True, blank=True)
+    remarks = models.TextField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Collector Node"
+        verbose_name_plural = "Collector Nodes"
+        unique_together = ('school', 'mac_address')
+
+class ReaderDevice(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='reader_devices') 
+    
+    node = models.ForeignKey(CollectorNode, on_delete=models.CASCADE, related_name='reader_devices')
+    
+    device_type = models.CharField(max_length=10, choices=DEVICE_TYPE_CHOICES)
+    location_description = models.CharField(max_length=255)
+    
+    status = models.CharField(max_length=10, default='OK')
+    last_seen = models.DateTimeField(null=True, blank=True)
+    firmware_version = models.CharField(max_length=50, null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Reader Device"
+        verbose_name_plural = "Reader Devices"
+        ordering = ['node', 'location_description']
+
+class DeviceErrorLog(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='device_error_logs') 
+    
+    device = models.ForeignKey('ReaderDevice', on_delete=models.SET_NULL, null=True, blank=True, related_name='error_logs')
+    timestamp = models.DateTimeField(auto_now_add=True)
+    error_message = models.TextField()
+    
+    severity = models.CharField(max_length=10, choices=ERROR_SEVERITY_CHOICES)
+
+    class Meta:
+        verbose_name = "Device Error Log"
+        verbose_name_plural = "Device Error Logs"
+        ordering = ['-timestamp']
+
+class AttendanceStatsDaily(models.Model):
+    school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='attendance_stats_daily') 
+    
+    date = models.DateField()
+    classroom = models.ForeignKey(Classroom, on_delete=models.CASCADE, related_name='daily_stats')
+    
+    present_count = models.PositiveIntegerField(default=0)
+    absent_count = models.PositiveIntegerField(default=0)
+    out_count = models.PositiveIntegerField(default=0)
+    late_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = "Daily Attendance Statistic"
+        verbose_name_plural = "Daily Attendance Statistics"
+        unique_together = ('school', 'date', 'classroom')
+        ordering = ['-date']
+./service_management/student_management/__init__.py:
+
+./service_management/student_management/consumers.py:
+import json
+from channels.generic.websocket import AsyncWebsocketConsumer
+
+class LiveAttendanceConsumer(AsyncWebsocketConsumer):
+    """
+    WebSocket consumer that streams live attendance taps to connected clients.
+    """
+
+    async def connect(self):
+        """
+        Accept the connection and join the school's live attendance group.
+        Expects URL: ws://.../ws/attendance/<school_id>/
+        """
+        self.school_id = self.scope['url_route']['kwargs']['school_id']
+        self.group_name = f"school_{self.school_id}"
+
+        # Join the group's channel
+        await self.channel_layer.group_add(
+            self.group_name,
+            self.channel_name
+        )
+
+        await self.accept()
+        print(f"WebSocket connected: Live Attendance for school {self.school_id}")
+
+    async def disconnect(self, close_code):
+        # Leave the group
+        await self.channel_layer.group_discard(
+            self.group_name,
+            self.channel_name
+        )
+        print(f"WebSocket disconnected: school {self.school_id}")
+
+    async def receive(self, text_data=None, bytes_data=None):
+        # Dashboard does not send data
+        pass
+
+    async def tap_event(self, event):
+        """
+        Receives 'tap_event' from backend (tasks.py) and forwards to browser.
+        """
+        await self.send(text_data=json.dumps(event["message"]))
+
+./service_management/student_management/views.py:
+# service_management/student_management/views.py
+from rest_framework import generics
+from rest_framework.response import Response
+from .models import Student
+from .serializers import StudentLookupSerializer
+from rest_framework.exceptions import NotFound
+
+class StudentLookupView(generics.RetrieveAPIView):
+    """
+    API endpoint to look up a student's basic details (role, school_id)
+    based on their RFID UID. Used by the Ingestion API for data enrichment.
+    """
+    queryset = Student.objects.all()
+    serializer_class = StudentLookupSerializer
+    lookup_field = 'rfid_uid'
+
+    def retrieve(self, request, *args, **kwargs):
+        try:
+            instance = self.get_object()
+            # Ensure the user object is also present (as it's used in the serializer)
+            if not instance.user:
+                 raise NotFound("Student found, but has no linked user account.")
+        except NotFound:
+            # Return a simple 404 response if the student isn't found
+            raise NotFound("Student not found with this RFID UID.")
+
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
+from rest_framework import generics
+from .models import AttendanceRecord
+from .serializers import AttendanceRecordSerializer
+
+class AttendanceRecordsView(generics.ListAPIView):
+    """
+    API endpoint to fetch attendance records.
+    Supports filtering by classroom_id, grade, section, date range.
+    """
+    serializer_class = AttendanceRecordSerializer
+
+    def get_queryset(self):
+        queryset = AttendanceRecord.objects.select_related('student', 'student__classroom').all()
+
+        # Filters
+        classroom_id = self.request.query_params.get('classroom_id')
+        grade = self.request.query_params.get('grade')
+        section = self.request.query_params.get('section')
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+
+        if classroom_id:
+            queryset = queryset.filter(student__classroom_id=classroom_id)
+        if grade:
+            queryset = queryset.filter(student__classroom__grade=grade)
+        if section:
+            queryset = queryset.filter(student__classroom__section=section)
+        if start_date:
+            queryset = queryset.filter(date__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(date__lte=end_date)
+
+        # Order by date descending
+        return queryset.order_by('-date', 'student__last_name')
+
+# service_management/student_management/views.py
+
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from .models import Student, AttendanceRecord  # assuming AttendanceRecord exists
+from django.utils.dateparse import parse_datetime
+
+@api_view(['GET'])
+def attendance_records(request):
+    """
+    Returns JSON list of attendance records.
+    Optional query params:
+      - grade: int
+      - section: str
+    """
+    records = AttendanceRecord.objects.select_related('student').all()
+    
+    grade = request.GET.get('grade')
+    section = request.GET.get('section')
+    
+    if grade:
+        records = records.filter(student__grade=grade)
+    if section:
+        records = records.filter(student__section__iexact=section)
+    
+    data = []
+    for r in records.order_by('-timestamp')[:100]:  # latest 100 records
+        data.append({
+            "timestamp": r.timestamp.isoformat(),
+            "student_name": r.student.full_name,  # assuming Student model has full_name
+            "grade": r.student.grade,
+            "section": r.student.section,
+            "status": r.status  # e.g., 'Present' or 'Absent'
+        })
+    
+    return Response(data)
+# student_management/views.py (add this at the bottom)
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
+from django.utils import timezone
+from .models import AttendanceRecord, Classroom, Student
+
+class LiveAttendanceAnalyticsView(APIView):
+    """
+    Returns recent attendance taps, optionally filtered by classroom.
+    Query params:
+      - classroom_id (int, optional)
+      - date (YYYY-MM-DD, optional, default today)
+    """
+    def get(self, request):
+        date_str = request.GET.get("date")
+        classroom_id = request.GET.get("classroom_id")
+        
+        if date_str:
+            try:
+                filter_date = timezone.datetime.strptime(date_str, "%Y-%m-%d").date()
+            except ValueError:
+                return Response({"error": "Invalid date format. Use YYYY-MM-DD."},
+                                status=status.HTTP_400_BAD_REQUEST)
+        else:
+            filter_date = timezone.now().date()
+        
+        # Base queryset: today's attendance records
+        queryset = AttendanceRecord.objects.filter(date=filter_date)
+        
+        # Optional classroom filter
+        if classroom_id:
+            queryset = queryset.filter(student__classroom_id=classroom_id)
+        
+        # Serialize to simple JSON
+        data = [
+            {
+                "student_name": f"{record.student.first_name} {record.student.last_name}",
+                "rfid_uid": record.student.rfid_uid,
+                "timestamp": record.tap_timestamp,
+                "device": getattr(record, "device_id", None),
+                "status": record.status,
+                "classroom": f"{record.student.classroom.grade}-{record.student.classroom.section}"
+            }
+            for record in queryset.order_by("-tap_timestamp")[:100]  # limit to last 100 taps
+        ]
+        
+        return Response({"records": data})
+
+./service_management/student_management/tests.py:
+from django.test import TestCase
+
+# Create your tests here.
+
+./service_management/student_management/worker_listener.py:
+# service_management/worker_listener.py
+import os
+import json
+import redis
+import time
+import django
+from student_management.tasks import process_tap_from_queue
+
+# --- Django Environment Setup ---
+# Initialize Django to access settings (REDIS_HOST, etc.) and run tasks
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+django.setup() 
+# --------------------------------
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis") 
+REDIS_CHANNEL = 'live_attendance'
+
+def start_worker_listener():
+    """
+    Monitors the 'live_attendance' Redis channel for messages published by the Ingestion API 
+    and sends them to the asynchronous processing task queue.
+    """
+    print(f"Starting Worker Listener for channel: {REDIS_CHANNEL}...")
+    
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+        pubsub = r.pubsub()
+        pubsub.subscribe(REDIS_CHANNEL)
+        print("Connected to Redis. Listening for new taps...")
+        
+        # Continuous listening loop
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                tap_data_json = message['data']
+                print(f"Ingested tap received. Queueing for processing...")
+                
+                # EXECUTE ASYNCHRONOUS TASK (Celery/RQ)
+                # .delay() immediately adds the task to the queue for a worker to pick up.
+                process_tap_from_queue.delay(tap_data_json)
+                
+    except redis.exceptions.ConnectionError as e:
+        print(f"FATAL ERROR: Could not connect to Redis: {e}. Retrying in 5s.")
+        time.sleep(5)
+        start_worker_listener() 
+    except Exception as e:
+        print(f"An unexpected error occurred in listener: {e}")
+
+if __name__ == '__main__':
+    start_worker_listener()
+./service_management/student_management/serializers.py:
+# service_management/student_management/serializers.py
+from rest_framework import serializers
+from .models import Student
+
+class StudentLookupSerializer(serializers.ModelSerializer):
+    # FIX: Get role from the linked user profile (Issue #3)
+    role = serializers.CharField(source='user.role')
+    school_id = serializers.IntegerField(source='school.pk')
+
+    class Meta:
+        model = Student
+        fields = ('rfid_uid', 'school_id', 'role')
+from .models import AttendanceRecord, Classroom, Student
+
+class AttendanceRecordSerializer(serializers.ModelSerializer):
+    student_name = serializers.CharField(source='student.last_name', read_only=True)
+    classroom = serializers.CharField(source='student.classroom.__str__', read_only=True)
+
+    class Meta:
+        model = AttendanceRecord
+        fields = [
+            'id',
+            'student_name',
+            'student_id',
+            'classroom',
+            'date',
+            'period_number',
+            'status',
+            'source',
+            'verified_by_teacher',
+            'tap_timestamp'
+        ]
+
+./service_management/student_management/apps.py:
+from django.apps import AppConfig
+
+
+class StudentManagementConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'student_management'
+
+./service_management/student_management/urls.py:
+# service_management/student_management/urls.py
+from django.urls import path
+from .views import StudentLookupView, attendance_records, LiveAttendanceAnalyticsView
+
+urlpatterns = [
+    path('lookup/<str:rfid_uid>/', StudentLookupView.as_view(), name='student-lookup'),
+    path('attendance/', attendance_records, name='attendance-records'),  # <-- new endpoint
+    path('live-attendance/', LiveAttendanceAnalyticsView.as_view(), name='live-attendance'),
+]
+
+./service_management/student_management/tasks.py:
+# service_management/student_management/tasks.py
+
+import json
+from celery import shared_task
+from core.services.rfid_service import RfidService
+from core.services.exceptions import BaseServiceException
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
+from .models import Student, AttendanceRecord
+
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def process_tap_from_queue(self, tap_data_json: str):
+    """
+    Process student tap, update DB, and broadcast live via WebSocket.
+    """
+    rfid_uid = "UNKNOWN"
+
+    try:
+        tap_data = json.loads(tap_data_json)
+        rfid_uid = tap_data.get('uid')
+        device_id = tap_data.get('device')
+        timestamp_str = tap_data.get('tap_time')
+        school_id = tap_data.get('school')
+
+        if not all([rfid_uid, device_id, timestamp_str, school_id]):
+            print(f"ERROR: Missing essential keys in task data. Data: {tap_data}")
+            return
+
+        # Process the tap (DB updates)
+        RfidService.process_student_tap(
+            rfid_uid=rfid_uid,
+            device_id=device_id,
+            timestamp_str=timestamp_str,
+            school_id=school_id
+        )
+
+        # Fetch the attendance record for broadcasting
+        try:
+            student = Student.objects.get(rfid_uid=rfid_uid)
+            attendance_record = AttendanceRecord.objects.filter(student=student).latest('date')
+        except Student.DoesNotExist:
+            print(f"Student with UID {rfid_uid} not found for live broadcast.")
+            return
+
+        # Broadcast via Channels
+        channel_layer = get_channel_layer()
+        event_data = {
+            "timestamp": attendance_record.date.isoformat(),
+            "student_name": f"{student.first_name} {student.last_name}",
+            "grade": attendance_record.student.classroom.grade,
+            "section": attendance_record.student.classroom.section,
+            "status": attendance_record.status
+        }
+
+        async_to_sync(channel_layer.group_send)(
+            "live_attendance",
+            {
+                "type": "attendance_event",
+                "data": event_data
+            }
+        )
+
+    except BaseServiceException as e:
+        print(f"SERVICE VIOLATION for {rfid_uid}: {e.message}. Abandoning retry.")
+
+    except Exception as exc:
+        print(f"CRITICAL ERROR processing {rfid_uid}. Retrying...")
+        raise self.retry(exc=exc)
+
+./service_management/dps_core/celery.py:
+import os
+from celery import Celery
+
+# Set the default Django settings module for the 'celery' program.
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+
+# Create the Celery application instance
+app = Celery('dps_core')
+
+# Load configuration from the Django settings file, using the 'CELERY' namespace.
+# e.g., it looks for settings starting with CELERY_ (like CELERY_BROKER_URL)
+app.config_from_object('django.conf:settings', namespace='CELERY')
+
+# Auto-discover tasks from all installed Django apps' 'tasks.py' modules.
+app.autodiscover_tasks()
+./service_management/dps_core/asgi.py:
+import os
+from django.core.asgi import get_asgi_application
+from channels.routing import ProtocolTypeRouter, URLRouter
+from channels.auth import AuthMiddlewareStack
+import student_management.routing
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "service_management.settings")
+
+django_asgi_app = get_asgi_application()
+
+application = ProtocolTypeRouter({
+    "http": django_asgi_app,
+    "websocket": AuthMiddlewareStack(
+        URLRouter(
+            student_management.routing.websocket_urlpatterns
+        )
+    ),
+})
+
+./service_management/dps_core/__init__.py:
+# service_management/dps_core/__init__.py
+
+# This ensures the Celery app is loaded when Django starts
+from .celery import app as celery_app 
+
+# Optional: define your default Django app setup here
+./service_management/dps_core/wsgi.py:
+"""
+WSGI config for dps_core project.
+
+It exposes the WSGI callable as a module-level variable named ``application``.
+
+For more information on this file, see
+https://docs.djangoproject.com/en/5.0/howto/deployment/wsgi/
+"""
+
+import os
+
+from django.core.wsgi import get_wsgi_application
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+
+application = get_wsgi_application()
+
+./service_management/dps_core/settings.py:
+import os
+from decouple import config
+from pathlib import Path
+
+"""
+Django settings for dps_core project.
+"""
+
+# -------------------------------------------------
+# BASE
+# -------------------------------------------------
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+SECRET_KEY = config('SECRET_KEY', default='a-fallback-secret-key-but-use-env-var')
+DEBUG = True
+ALLOWED_HOSTS = [
+    "localhost",
+    "127.0.0.1",
+    "dps_management_web",
+]
+
+
+# -------------------------------------------------
+# APPLICATIONS
+# -------------------------------------------------
+INSTALLED_APPS = [
+    # LOCAL APPS
+    'student_management.apps.StudentManagementConfig',
+
+    # THIRD PARTY
+    'channels',
+    'rest_framework',
+
+    # DJANGO CORE
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+]
+
+# -------------------------------------------------
+# MIDDLEWARE
+# -------------------------------------------------
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.common.CommonMiddleware',
+    'django.middleware.csrf.CsrfViewMiddleware',
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.messages.middleware.MessageMiddleware',
+    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+]
+
+# -------------------------------------------------
+# URL / ASGI / WSGI
+# -------------------------------------------------
+ROOT_URLCONF = 'dps_core.urls'
+
+ASGI_APPLICATION = 'service_management.asgi.application'
+WSGI_APPLICATION = 'dps_core.wsgi.application'
+
+# -------------------------------------------------
+# TEMPLATES
+# -------------------------------------------------
+TEMPLATES = [
+    {
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'DIRS': [],
+        'APP_DIRS': True,
+        'OPTIONS': {
+            'context_processors': [
+                'django.template.context_processors.debug',
+                'django.template.context_processors.request',
+                'django.contrib.auth.context_processors.auth',
+                'django.contrib.messages.context_processors.messages',
+            ],
+        },
+    },
+]
+
+# -------------------------------------------------
+# DATABASE
+# -------------------------------------------------
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB'),
+        'USER': os.environ.get('POSTGRES_USER'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD'),
+        'HOST': os.environ.get('POSTGRES_HOST'),
+        'PORT': '5432',
+    }
+}
+
+# -------------------------------------------------
+# AUTH
+# -------------------------------------------------
+AUTH_USER_MODEL = 'student_management.StudentManagementUser'
+
+AUTH_PASSWORD_VALIDATORS = [
+    {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
+    {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+]
+
+# -------------------------------------------------
+# INTERNATIONALIZATION
+# -------------------------------------------------
+LANGUAGE_CODE = 'en-us'
+TIME_ZONE = 'UTC'
+USE_I18N = True
+USE_TZ = True
+
+# -------------------------------------------------
+# STATIC FILES
+# -------------------------------------------------
+STATIC_URL = 'static/'
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# -------------------------------------------------
+# CELERY (Already used by you)
+# -------------------------------------------------
+CELERY_BROKER_URL = 'redis://redis:6379/0'
+CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
+CELERY_TASK_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+
+# -------------------------------------------------
+# CHANNELS (NEW – REALTIME ENGINE)
+# -------------------------------------------------
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("redis", 6379)],
+        },
+    },
+}
+
+./service_management/dps_core/urls.py:
+# service_management/dps_core/urls.py (Ensure this exists)
+from django.contrib import admin
+from django.urls import path, include
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    # Add your student_management app's URLs for API endpoints
+    path('api/v1/', include('student_management.urls')),
+]
+./service_management/worker_listener.py:
+import os
+import json
+import redis
+import time
+import django
+
+# Set up Django environment so we can access settings and Celery tasks
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+django.setup() 
+
+# Import the task created above
+from student_management.tasks import process_tap_from_queue
+
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis") 
+REDIS_CHANNEL = 'live_attendance'
+
+def start_worker_listener():
+    """Monitors the Redis Pub/Sub channel and dispatches taps to the Celery queue."""
+    print(f"Starting Worker Listener for channel: {REDIS_CHANNEL}...")
+    
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
+        pubsub = r.pubsub()
+        pubsub.subscribe(REDIS_CHANNEL)
+        print("Connected to Redis. Listening for new taps...")
+        
+        for message in pubsub.listen():
+            if message['type'] == 'message':
+                tap_data_json = message['data']
+                print(f"Ingested tap received. Queueing for processing...")
+                
+                # Enqueue the job for the worker to process
+                process_tap_from_queue.delay(tap_data_json)
+                
+    except redis.exceptions.ConnectionError as e:
+        print(f"FATAL ERROR: Could not connect to Redis: {e}. Retrying in 5s.")
+        time.sleep(5)
+        start_worker_listener() 
+    except Exception as e:
+        print(f"An unexpected error occurred in listener: {e}")
+
+if __name__ == '__main__':
+    start_worker_listener()
+./service_management/manage.py:
+#!/usr/bin/env python
+"""Django's command-line utility for administrative tasks."""
+import os
+import sys
+
+
+def main():
+    """Run administrative tasks."""
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+    try:
+        from django.core.management import execute_from_command_line
+    except ImportError as exc:
+        raise ImportError(
+            "Couldn't import Django. Are you sure it's installed and "
+            "available on your PYTHONPATH environment variable? Did you "
+            "forget to activate a virtual environment?"
+        ) from exc
+    execute_from_command_line(sys.argv)
+
+
+if __name__ == '__main__':
+    main()
+

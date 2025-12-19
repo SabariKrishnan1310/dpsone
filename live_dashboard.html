@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Attendance Dashboard</title>
+
+    <!-- Fonts: Inter (Closest to Apple's SF Pro) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Custom Config -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'ui-sans-serif', 'system-ui'],
+                    },
+                    colors: {
+                        brand: {
+                            DEFAULT: '#016d35', // Primary Green
+                            light: '#f0fdf4',
+                        }
+                    },
+                    boxShadow: {
+                        'apple-card': '0 2px 12px rgba(0, 0, 0, 0.03)',
+                        'apple-hover': '0 20px 40px rgba(0, 0, 0, 0.06)',
+                        'glass': 'inset 0 0 0 1px rgba(255, 255, 255, 0.4)'
+                    }
+                }
+            }
+        }
+    </script>
+
+    <style>
+        body {
+            background-color: #fbfbfd;
+            -webkit-font-smoothing: antialiased;
+            letter-spacing: -0.011em;
+        }
+
+        /* Smooth Row Entry */
+        @keyframes appleSlide {
+            0% { 
+                opacity: 0; 
+                transform: scale(0.99) translateY(10px); 
+                background-color: #f0fdf4;
+            }
+            100% { 
+                opacity: 1; 
+                transform: scale(1) translateY(0);
+                background-color: transparent;
+            }
+        }
+        .new-row { 
+            animation: appleSlide 0.7s cubic-bezier(0.15, 0, 0.2, 1) forwards; 
+        }
+
+        /* Subtle KPI Pop */
+        @keyframes kpiPop {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); color: #016d35; }
+            100% { transform: scale(1); }
+        }
+        .kpi-update { animation: kpiPop 0.4s ease-out; }
+
+        /* Glassmorphism Navigation */
+        .glass-nav {
+            background: rgba(251, 251, 253, 0.8);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            border-bottom: 1px solid rgba(0,0,0,0.06);
+        }
+
+        /* Custom Scrollbar */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+
+<body class="min-h-screen flex flex-col">
+
+    <!-- TOP NAVIGATION -->
+    <nav class="glass-nav sticky top-0 z-50 px-6 py-4">
+        <div class="max-w-6xl mx-auto flex justify-between items-center">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-[9px] bg-brand flex items-center justify-center text-white shadow-sm">
+                    <i data-lucide="radio" class="w-4 h-4"></i>
+                </div>
+                <h1 class="text-lg font-semibold tracking-tight">NFC Attendance</h1>
+            </div>
+            
+            <div class="flex items-center gap-6 text-sm font-medium text-slate-500">
+                <div class="flex items-center gap-2">
+                    <span id="display-date" class="text-slate-900"></span>
+                </div>
+                <div class="h-4 w-px bg-slate-200"></div>
+                <div class="flex items-center gap-2">
+                    <div class="relative flex h-2 w-2">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-brand opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-2 w-2 bg-brand"></span>
+                    </div>
+                    <span class="text-brand">Live Feed</span>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- MAIN DASHBOARD -->
+    <main class="max-w-6xl mx-auto w-full flex-1 flex flex-col p-6 md:p-10 gap-10">
+        
+        <!-- KPI SECTION -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Total Card -->
+            <div class="bg-white p-8 rounded-[32px] shadow-apple-card border border-slate-100/60 hover:shadow-apple-hover transition-all duration-500">
+                <p class="text-[13px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Total Expected</p>
+                <div id="kpi-total" class="text-5xl font-bold tracking-tight text-slate-900 tabular-nums">1,240</div>
+            </div>
+
+            <!-- Present Card -->
+            <div class="bg-white p-8 rounded-[32px] shadow-apple-card border border-slate-100/60 hover:shadow-apple-hover transition-all duration-500 relative overflow-hidden group">
+                <div class="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+                    <i data-lucide="check-circle" class="w-16 h-16 text-brand"></i>
+                </div>
+                <p class="text-[13px] font-semibold text-brand uppercase tracking-wider mb-2">Present Now</p>
+                <div id="kpi-present" class="text-5xl font-bold tracking-tight text-brand tabular-nums">0</div>
+            </div>
+
+            <!-- Absent Card -->
+            <div class="bg-white p-8 rounded-[32px] shadow-apple-card border border-slate-100/60 hover:shadow-apple-hover transition-all duration-500">
+                <p class="text-[13px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Remaining</p>
+                <div id="kpi-absent" class="text-5xl font-bold tracking-tight text-slate-900 tabular-nums">1,240</div>
+            </div>
+        </div>
+
+        <!-- TABLE SECTION -->
+        <div class="flex-1 flex flex-col">
+            <div class="flex justify-between items-end mb-6 px-2">
+                <div>
+                    <h3 class="text-2xl font-bold text-slate-900 tracking-tight">Recent Activity</h3>
+                    <p class="text-slate-400 text-sm mt-1 font-medium">Auto-updating real-time tap history</p>
+                </div>
+                <div class="flex gap-2">
+                    <button class="px-4 py-2 bg-slate-100 text-slate-600 rounded-full text-xs font-semibold hover:bg-slate-200 transition-colors">Export CSV</button>
+                    <button class="px-4 py-2 bg-brand text-white rounded-full text-xs font-semibold hover:opacity-90 transition-opacity">Archive</button>
+                </div>
+            </div>
+
+            <div class="bg-white rounded-[32px] shadow-apple-card border border-slate-100/60 overflow-hidden flex-1 flex flex-col">
+                <div class="overflow-auto no-scrollbar flex-1">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="text-[11px] font-bold text-slate-400 uppercase tracking-[0.1em] border-b border-slate-50 bg-slate-50/30">
+                                <th class="px-8 py-5">Time</th>
+                                <th class="px-8 py-5">Student</th>
+                                <th class="px-8 py-5">Class & Section</th>
+                                <th class="px-8 py-5">Status</th>
+                                <th class="px-8 py-5 text-right">Device ID</th>
+                            </tr>
+                        </thead>
+                        <tbody id="attendance-table" class="divide-y divide-slate-50">
+                            <!-- Empty State -->
+                            <tr id="empty-state">
+                                <td colspan="5" class="py-32 text-center">
+                                    <div class="flex flex-col items-center justify-center">
+                                        <div class="w-20 h-20 bg-slate-50 rounded-full flex items-center justify-center mb-6">
+                                            <i data-lucide="scan-face" class="w-8 h-8 text-slate-200"></i>
+                                        </div>
+                                        <h4 class="text-slate-400 font-medium">Ready to receive NFC taps</h4>
+                                        <p class="text-slate-300 text-xs mt-1">WebSocket listener active on port 8001</p>
+                                    </div>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- FOOTER -->
+    <footer class="p-8 text-center text-slate-300 text-xs font-medium tracking-wide">
+        &copy; 2025 NFC Attendance System &bull; Secure Protocol Active
+    </footer>
+
+    <!-- LOGIC -->
+    <script>
+        // Init UI Components
+        lucide.createIcons();
+        document.getElementById('display-date').innerText = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+        // --- BACKEND WEBSOCKET LOGIC ---
+        const schoolId = 1;
+        const socket = new WebSocket(`ws://localhost:8001/ws/attendance/${schoolId}/`);
+
+        const TOTAL_STUDENTS = 1240;
+        const presentStudents = new Set();
+        const table = document.getElementById('attendance-table');
+        const emptyState = document.getElementById('empty-state');
+
+        const elPresent = document.getElementById('kpi-present');
+        const elAbsent  = document.getElementById('kpi-absent');
+
+        socket.onopen = () => console.log("✅ WebSocket connected");
+
+        socket.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+
+                const {
+                    student_name,
+                    grade,
+                    section,
+                    status,
+                    device_id,
+                    timestamp
+                } = data;
+
+                if (status === "PRESENT") {
+                    presentStudents.add(student_name);
+                }
+
+                updateKPIs();
+                addRow({ student_name, grade, section, status, device_id, timestamp });
+
+            } catch (e) {
+                console.error("WS parse error:", e);
+            }
+        };
+
+        function updateKPIs() {
+            elPresent.innerText = presentStudents.size.toLocaleString();
+            elAbsent.innerText = (TOTAL_STUDENTS - presentStudents.size).toLocaleString();
+            
+            // KPI Update Animation
+            elPresent.classList.remove('kpi-update');
+            void elPresent.offsetWidth; // Trigger reflow
+            elPresent.classList.add('kpi-update');
+        }
+
+        function addRow(data) {
+            if (emptyState) emptyState.remove();
+
+            const tr = document.createElement('tr');
+            tr.className = "new-row group hover:bg-slate-50/50 transition-colors";
+
+            const dateObj = new Date(data.timestamp);
+            const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute:'2-digit', second: '2-digit' });
+
+            tr.innerHTML = `
+                <td class="px-8 py-5">
+                    <span class="text-slate-400 font-medium text-xs tracking-tight">${timeStr}</span>
+                </td>
+                <td class="px-8 py-5">
+                    <div class="flex items-center gap-4">
+                        <div class="w-9 h-9 rounded-full bg-slate-100 text-slate-600 flex items-center justify-center text-xs font-bold border border-white shadow-sm">
+                            ${data.student_name.charAt(0)}
+                        </div>
+                        <span class="font-semibold text-slate-800 tracking-tight">${data.student_name}</span>
+                    </div>
+                </td>
+                <td class="px-8 py-5">
+                    <span class="text-sm font-medium text-slate-500">Grade ${data.grade}</span>
+                    <span class="mx-2 text-slate-200 text-xs">|</span>
+                    <span class="text-xs text-slate-400 font-bold uppercase">${data.section}</span>
+                </td>
+                <td class="px-8 py-5">
+                    <span class="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[10px] font-bold bg-brand/5 text-brand border border-brand/10 uppercase tracking-wider">
+                        <span class="w-1.5 h-1.5 rounded-full bg-brand"></span>
+                        Checked In
+                    </span>
+                </td>
+                <td class="px-8 py-5 text-right">
+                    <span class="text-[10px] font-mono text-slate-300 bg-slate-50/50 px-2 py-1 rounded-md">
+                        ${data.device_id}
+                    </span>
+                </td>
+            `;
+
+            table.prepend(tr);
+            
+            // Ensure icons are created for new row content if any
+            lucide.createIcons();
+
+            if (table.children.length > 100) {
+                table.lastElementChild.remove();
+            }
+        }
+
+        socket.onerror = e => console.error("WS error", e);
+        socket.onclose = () => console.log("🔌 WebSocket disconnected");
+    </script>
+</body>
+</html>

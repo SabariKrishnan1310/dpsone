@@ -1,0 +1,8 @@
+# service_ingestion/requirements.txt
+fastapi
+uvicorn[standard]
+pydantic
+psycopg2-binary  # PostgreSQL adapter
+sqlalchemy       # Database ORM
+redis[async]==5.0.1 # Python Redis client (including async client for WebSockets)
+httpx

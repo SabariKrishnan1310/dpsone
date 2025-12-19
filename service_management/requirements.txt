@@ -1,0 +1,11 @@
+# service_management/requirements.txt
+Django~=5.0.0
+psycopg2-binary # For PostgreSQL database connection
+python-decouple # To safely manage environment variables like SECRET_KEY
+djangorestframework # Needed later for secure APIs
+# service_management/requirements.txt
+redis
+celery
+django-redis
+channels==4.0.0
+whitenoise
