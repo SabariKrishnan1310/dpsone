@@ -35,8 +35,9 @@ class LiveAttendanceConsumer(AsyncWebsocketConsumer):
         # Dashboard does not send data
         pass
 
-    async def tap_event(self, event):
+    async def attendance_message(self, event):
         """
-        Receives 'tap_event' from backend (tasks.py) and forwards to browser.
+        Receives 'attendance.message' from the backend and forwards the payload to the browser.
         """
-        await self.send(text_data=json.dumps(event["message"]))
+        # The event dictionary contains the 'data' key with our payload
+        await self.send(text_data=json.dumps(event["data"]))

@@ -6,6 +6,8 @@ from channels.layers import get_channel_layer
 from .models import Student, AttendanceRecord
 from core.services.rfid_service import RfidService
 from core.services.exceptions import BaseServiceException
+from student_management.ws_payloads import attendance_event_payload
+
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def process_tap_from_queue(self, tap_data_json: str):
@@ -47,20 +49,14 @@ def process_tap_from_queue(self, tap_data_json: str):
         channel_layer = get_channel_layer()
         group_name = f"school_{school_id}"
 
-        event_data = {
-            "timestamp": attendance_record.tap_timestamp.isoformat() if attendance_record.tap_timestamp else None,
-            "student_name": f"{student.first_name} {student.last_name}",
-            "grade": student.classroom.grade,
-            "section": student.classroom.section,
-            "status": attendance_record.status,
-            "device_id": device_id
-        }
+        # Create the payload using the new function
+        payload = attendance_event_payload(attendance_record)
 
         async_to_sync(channel_layer.group_send)(
             group_name,
             {
-                "type": "tap_event",  # matches consumer
-                "message": event_data
+                "type": "attendance.message",  # New type for the consumer
+                "data": payload
             }
         )
 
