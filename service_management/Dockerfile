@@ -2,7 +2,7 @@ FROM python:3.11-alpine
 
 ENV PYTHONUNBUFFERED=1
 
-WORKDIR /usr/src/app
+WORKDIR /usr/s/rc/app
 
 # System deps
 RUN apk update && \
@@ -17,8 +17,8 @@ RUN pip install --no-cache-dir daphne channels_redis whitenoise
 # 🔴 COPY APP FIRST (THIS WAS MISSING)
 COPY . .
 
-# 🔴 NOW collect static (admin CSS will exist)
+
 RUN python manage.py collectstatic --noinput
 
-# Optional cleanup
+
 RUN apk del build-base

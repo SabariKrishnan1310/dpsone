@@ -52,12 +52,15 @@ services:
       context: ./service_management
       dockerfile: Dockerfile
     container_name: dps_management_web
-    command: python manage.py runserver 0.0.0.0:8001
+    command: daphne -b 0.0.0.0 -p 8001 dps_core.asgi:application
+
     ports:
       - "8001:8001"
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     environment:
       DJANGO_SETTINGS_MODULE: dps_core.settings
       POSTGRES_HOST: db
@@ -363,35 +366,31 @@ async def websocket_endpoint(websocket: WebSocket):
 ./main.py:
 
 ./service_management/Dockerfile:
-# service_management/Dockerfile (Corrected)
-
-# Base Image
 FROM python:3.11-alpine
 
-# Set environment variables for non-interactive commands
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONUNBUFFERED=1
 
-# Create the app directory and set it as working directory
-WORKDIR /usr/src/app
+WORKDIR /usr/s/rc/app
 
-# Copy requirements file and install dependencies FIRST (for cache)
-COPY requirements.txt /usr/src/app/
-
-# CRITICAL FIX: Add 'libpq-dev' for psycopg2 to compile, and 'build-base' 
-# for general compilation tools.
+# System deps
 RUN apk update && \
     apk add --no-cache postgresql-client libpq-dev build-base
 
+# Install Python deps
+COPY requirements.txt .
 RUN pip install --upgrade pip
 RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir daphne channels_redis whitenoise
 
-# Remove build dependencies to keep the image small
-RUN apk del build-base 
+# 🔴 COPY APP FIRST (THIS WAS MISSING)
+COPY . .
 
-# Copy the rest of the application code
-COPY . /usr/src/app/
 
-# The CMD is defined in docker-compose.yml for web/worker/listener
+RUN python manage.py collectstatic --noinput
+
+
+RUN apk del build-base
+
 ./service_management/core/__init__.py:
 
 ./service_management/core/services/exceptions.py:
@@ -2099,17 +2098,17 @@ class LibraryService:
         return book_issue, fine_amount
 ./service_management/student_management/asgi.py:
 import os
-from django.core.asgi import get_asgi_application
+import django
 from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
+from django.core.asgi import get_asgi_application
 import student_management.routing
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "service_management.settings")
-
-django_asgi_app = get_asgi_application()
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dps_core.settings")
+django.setup()
 
 application = ProtocolTypeRouter({
-    "http": django_asgi_app,
+    "http": get_asgi_application(),
     "websocket": AuthMiddlewareStack(
         URLRouter(
             student_management.routing.websocket_urlpatterns
@@ -2119,13 +2118,10 @@ application = ProtocolTypeRouter({
 
 ./service_management/student_management/routing.py:
 from django.urls import re_path
-from .consumers import LiveAttendanceConsumer
+from . import consumers
 
 websocket_urlpatterns = [
-    re_path(
-        r"^ws/attendance/(?P<school_id>\d+)/$",
-        LiveAttendanceConsumer.as_asgi()
-    ),
+    re_path(r'ws/attendance/(?P<school_id>\d+)/$', consumers.LiveAttendanceConsumer.as_asgi()),
 ]
 
 ./service_management/student_management/admin.py:
@@ -2422,19 +2418,27 @@ class StudentManagementUserManager(BaseUserManager):
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
-        extra_fields.setdefault('role', 'Admin')
+
+        # REMOVE role from extra_fields and control it explicitly
+        extra_fields.pop('role', None)
 
         if extra_fields.get('is_staff') is not True:
             raise ValueError(_('Superuser must have is_staff=True.'))
         if extra_fields.get('is_superuser') is not True:
             raise ValueError(_('Superuser must have is_superuser=True.'))
-        
-        # Superuser creation requires a school instance, create it if it doesn't exist.
+
         school, created = School.objects.get_or_create(
-            slug='default-school', defaults={'name': 'Default School', 'is_active': True}
+            slug='default-school',
+            defaults={'name': 'Default School', 'is_active': True}
         )
-        # Ensure create_user is called with the found/created school
-        return self.create_user(email, password, school=school, role='Admin', **extra_fields)
+
+        return self.create_user(
+            email=email,
+            password=password,
+            school=school,
+            role='Admin',
+            **extra_fields
+        )
 
 
 class StudentManagementUser(AbstractBaseUser, PermissionsMixin):
@@ -3094,6 +3098,25 @@ class LiveAttendanceConsumer(AsyncWebsocketConsumer):
         """
         await self.send(text_data=json.dumps(event["message"]))
 
+./service_management/student_management/management/commands/createsuperuser.py:
+from django.contrib.auth.management.commands.createsuperuser import Command as BaseCommand
+from student_management.models import School
+
+
+class Command(BaseCommand):
+    def handle(self, *args, **options):
+        # Remove school prompt completely
+        self.UserModel.REQUIRED_FIELDS = []
+
+        school, _ = School.objects.get_or_create(
+            slug='default-school',
+            defaults={'name': 'Default School', 'is_active': True}
+        )
+
+        options['school'] = school
+
+        super().handle(*args, **options)
+
 ./service_management/student_management/views.py:
 # service_management/student_management/views.py
 from rest_framework import generics
@@ -3304,7 +3327,7 @@ from rest_framework import serializers
 from .models import Student
 
 class StudentLookupSerializer(serializers.ModelSerializer):
-    # FIX: Get role from the linked user profile (Issue #3)
+
     role = serializers.CharField(source='user.role')
     school_id = serializers.IntegerField(source='school.pk')
 
@@ -3353,15 +3376,13 @@ urlpatterns = [
 
 ./service_management/student_management/tasks.py:
 # service_management/student_management/tasks.py
-
 import json
 from celery import shared_task
-from core.services.rfid_service import RfidService
-from core.services.exceptions import BaseServiceException
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from .models import Student, AttendanceRecord
-
+from core.services.rfid_service import RfidService
+from core.services.exceptions import BaseServiceException
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def process_tap_from_queue(self, tap_data_json: str):
@@ -3369,7 +3390,6 @@ def process_tap_from_queue(self, tap_data_json: str):
     Process student tap, update DB, and broadcast live via WebSocket.
     """
     rfid_uid = "UNKNOWN"
-
     try:
         tap_data = json.loads(tap_data_json)
         rfid_uid = tap_data.get('uid')
@@ -3381,7 +3401,7 @@ def process_tap_from_queue(self, tap_data_json: str):
             print(f"ERROR: Missing essential keys in task data. Data: {tap_data}")
             return
 
-        # Process the tap (DB updates)
+        # --- Process the tap (update DB) ---
         RfidService.process_student_tap(
             rfid_uid=rfid_uid,
             device_id=device_id,
@@ -3389,37 +3409,43 @@ def process_tap_from_queue(self, tap_data_json: str):
             school_id=school_id
         )
 
-        # Fetch the attendance record for broadcasting
+        # --- Fetch attendance record for broadcast ---
         try:
-            student = Student.objects.get(rfid_uid=rfid_uid)
-            attendance_record = AttendanceRecord.objects.filter(student=student).latest('date')
+            student = Student.objects.select_related('classroom').get(rfid_uid=rfid_uid)
+            attendance_record = AttendanceRecord.objects.filter(student=student).latest('tap_timestamp')
         except Student.DoesNotExist:
             print(f"Student with UID {rfid_uid} not found for live broadcast.")
             return
+        except AttendanceRecord.DoesNotExist:
+            print(f"No attendance record found for student {rfid_uid} to broadcast.")
+            return
 
-        # Broadcast via Channels
+        # --- Broadcast to WebSocket ---
         channel_layer = get_channel_layer()
+        group_name = f"school_{school_id}"
+
         event_data = {
-            "timestamp": attendance_record.date.isoformat(),
+            "timestamp": attendance_record.tap_timestamp.isoformat() if attendance_record.tap_timestamp else None,
             "student_name": f"{student.first_name} {student.last_name}",
-            "grade": attendance_record.student.classroom.grade,
-            "section": attendance_record.student.classroom.section,
-            "status": attendance_record.status
+            "grade": student.classroom.grade,
+            "section": student.classroom.section,
+            "status": attendance_record.status,
+            "device_id": device_id
         }
 
         async_to_sync(channel_layer.group_send)(
-            "live_attendance",
+            group_name,
             {
-                "type": "attendance_event",
-                "data": event_data
+                "type": "tap_event",  # matches consumer
+                "message": event_data
             }
         )
 
     except BaseServiceException as e:
-        print(f"SERVICE VIOLATION for {rfid_uid}: {e.message}. Abandoning retry.")
+        print(f"SERVICE ERROR for {rfid_uid}: {e.message}. Skipping retry.")
 
     except Exception as exc:
-        print(f"CRITICAL ERROR processing {rfid_uid}. Retrying...")
+        print(f"CRITICAL ERROR processing {rfid_uid}: {exc}. Retrying...")
         raise self.retry(exc=exc)
 
 ./service_management/dps_core/celery.py:
@@ -3531,6 +3557,7 @@ INSTALLED_APPS = [
 # -------------------------------------------------
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -3543,8 +3570,8 @@ MIDDLEWARE = [
 # URL / ASGI / WSGI
 # -------------------------------------------------
 ROOT_URLCONF = 'dps_core.urls'
-
 ASGI_APPLICATION = 'service_management.asgi.application'
+
 WSGI_APPLICATION = 'dps_core.wsgi.application'
 
 # -------------------------------------------------
@@ -3626,7 +3653,9 @@ CHANNEL_LAYERS = {
         },
     },
 }
-
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 ./service_management/dps_core/urls.py:
 # service_management/dps_core/urls.py (Ensure this exists)
 from django.contrib import admin
