@@ -6,9 +6,6 @@ from pathlib import Path
 Django settings for dps_core project.
 """
 
-# -------------------------------------------------
-# BASE
-# -------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = config('SECRET_KEY', default='a-fallback-secret-key-but-use-env-var')
@@ -21,18 +18,12 @@ ALLOWED_HOSTS = [
 ]
 
 
-# -------------------------------------------------
-# APPLICATIONS
-# -------------------------------------------------
 INSTALLED_APPS = [
-    # LOCAL APPS
     'student_management.apps.StudentManagementConfig',
     'auditlog',
-    # THIRD PARTY
     'channels',
     'rest_framework',
 
-    # DJANGO CORE
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
@@ -41,9 +32,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
 ]
 
-# -------------------------------------------------
-# MIDDLEWARE
-# -------------------------------------------------
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
@@ -55,17 +43,11 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-# -------------------------------------------------
-# URL / ASGI / WSGI
-# -------------------------------------------------
 ROOT_URLCONF = 'dps_core.urls'
 ASGI_APPLICATION = 'service_management.asgi.application'
 
 WSGI_APPLICATION = 'dps_core.wsgi.application'
 
-# -------------------------------------------------
-# TEMPLATES
-# -------------------------------------------------
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
@@ -82,9 +64,6 @@ TEMPLATES = [
     },
 ]
 
-# -------------------------------------------------
-# DATABASE
-# -------------------------------------------------
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -96,9 +75,6 @@ DATABASES = {
     }
 }
 
-# -------------------------------------------------
-# AUTH
-# -------------------------------------------------
 AUTH_USER_MODEL = 'student_management.StudentManagementUser'
 
 AUTH_PASSWORD_VALIDATORS = [
@@ -108,33 +84,21 @@ AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
 ]
 
-# -------------------------------------------------
-# INTERNATIONALIZATION
-# -------------------------------------------------
 LANGUAGE_CODE = 'en-us'
 TIME_ZONE = 'UTC'
 USE_I18N = True
 USE_TZ = True
 
-# -------------------------------------------------
-# STATIC FILES
-# -------------------------------------------------
 STATIC_URL = '/static/'
 STATIC_ROOT = '/usr/src/app/staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-# -------------------------------------------------
-# CELERY (Already used by you)
-# -------------------------------------------------
 CELERY_BROKER_URL = 'redis://redis:6379/0'
 CELERY_RESULT_BACKEND = 'redis://redis:6379/0'
 CELERY_TASK_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
-# -------------------------------------------------
-# CHANNELS (NEW – REALTIME ENGINE)
-# -------------------------------------------------
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",

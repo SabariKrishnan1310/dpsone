@@ -36,9 +36,6 @@ class StudentService:
         if not classroom.is_active:
             raise ObjectNotActiveError(f"Classroom {classroom.grade}-{classroom.section} is inactive.")
             
-        # Optional: Classroom capacity check
-        # if classroom.students.count() >= classroom.capacity:
-        #     raise BusinessRuleViolation("Classroom has reached maximum capacity.")
             
         return classroom
     
@@ -61,7 +58,6 @@ class StudentService:
         """
         Validates all necessary prerequisites and creates a new Student record.
         """
-        # 1. Validation and Resource Retrieval
         school = cls._validate_school_context(school_id)
         classroom = cls._validate_classroom(classroom_id, school)
         
@@ -70,19 +66,16 @@ class StudentService:
         except Parent.DoesNotExist:
             raise ResourceNotFoundError("Parent record must exist before student enrollment.")
         
-        # Validate data integrity from input
         required_fields = ['first_name', 'last_name', 'admission_number']
         for field in required_fields:
             if not student_data.get(field):
                 raise ValidationError(f"Missing required field: {field}")
                 
-        # 2. Business Rule Validation (admission_number only, RFID handled separately)
         cls._validate_unique_enrollment(
             school=school, 
             admission_number=student_data.get('admission_number')
         )
 
-        # 3. Execution (Creation)
         student = Student.objects.create(
             school=school,
             classroom=classroom,
@@ -108,7 +101,6 @@ class StudentService:
         student = get_object_or_404(Student, pk=student_id)
         school = student.school
         
-        # 1. Validate RFID UID is not already assigned to another student in the school
         existing_card = RFIDCard.objects.filter(
             school=school, 
             uid=rfid_uid,
@@ -120,7 +112,6 @@ class StudentService:
                 f"RFID UID '{rfid_uid}' is already assigned to {existing_card.assigned_to_student.last_name}."
             )
         
-        # 2. Get or create RFIDCard
         rfid_card, created = RFIDCard.objects.get_or_create(
             school=school,
             uid=rfid_uid,
@@ -130,7 +121,6 @@ class StudentService:
             }
         )
         
-        # 3. If card exists but unassigned or assigned to different student, update it
         if not created:
             old_student = rfid_card.assigned_to_student
             if rfid_card.assigned_to_student != student:
@@ -149,7 +139,6 @@ class StudentService:
         """
         student = get_object_or_404(Student, pk=student_id)
         
-        # Mark all active RFID cards as lost
         RFIDCard.objects.filter(
             assigned_to_student=student,
             status='ACTIVE'
@@ -157,8 +146,6 @@ class StudentService:
         
         return student
         
-        # 4. Side Effect (Optional: Send welcome email to parent)
-        # MessagingService.send_enrollment_confirmation(parent, student)
         
         return student
 
@@ -169,15 +156,11 @@ class StudentService:
         
         student = get_object_or_404(Student, pk=student_id)
         
-        # 1. Validation: Ensure new classroom is valid within the student's school
         new_classroom = cls._validate_classroom(new_classroom_id, student.school)
         
-        # 2. Execution (Update)
         if student.classroom_id != new_classroom_id:
             student.classroom = new_classroom
             student.save(update_fields=['classroom'])
             
-            # 3. Side Effect (Optional: Log transfer for audit)
-            # LogService.log_event(student.school, 'CLASS_TRANSFER', f'Student {student.pk} transferred to {new_classroom.pk}')
         
         return student

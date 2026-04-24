@@ -678,7 +678,6 @@ class ReaderDevice(models.Model):
     last_seen = models.DateTimeField(null=True, blank=True)
     firmware_version = models.CharField(max_length=50, null=True, blank=True)
     
-    # New fields for telemetry and device state
     storage_left = models.PositiveIntegerField(null=True, blank=True)
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)

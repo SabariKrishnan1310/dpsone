@@ -1,77 +1,54 @@
-# service_management/student_management/admin.py (FINAL, ROBUST FIX)
 
 from django.contrib import admin
-# We need to import forms and the base UserAdmin
 from django import forms 
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (
-    # Custom User Model
     StudentManagementUser, 
-    # Core Tenancy and Structure
     School, 
     Classroom, 
-    # Profile Models
     Teacher, 
     Parent, 
     Student,
-    # RFID/Attendance
     TapLog, 
     AttendanceRecord,
     RFIDCard,
-    # Timetable/Subjects
     Subject,
     TeacherSubjectMapping, 
     TimetableEntry,
-    # Communications
     Announcement,
     MessageThread,
     Message,
-    # Financial/Canteen
     CanteenItem,
     Wallet,
     WalletTransaction,
 )
 
-# ----------------------------------------------------
-# 1. Custom User Forms (NEW CRITICAL ADDITION)
-# ----------------------------------------------------
 
-# Form used when editing an existing user (Change View)
 class StudentManagementUserChangeForm(forms.ModelForm):
     class Meta:
         model = StudentManagementUser
-        # Use all fields for simplicity, or explicitly list them (excluding 'username')
         fields = '__all__'
         
-# Form used when creating a new user (Add User page)
-# This explicitly defines the fields and excludes 'username'
 class StudentManagementUserCreationForm(forms.ModelForm):
-    # These fields are required by the BaseUserAdmin add_view logic
     password = forms.CharField(label='Password', widget=forms.PasswordInput)
     password2 = forms.CharField(label='Password confirmation', widget=forms.PasswordInput)
 
     class Meta:
         model = StudentManagementUser
-        # IMPORTANT: Use only the fields present in your custom model (StudentManagementUser)
         fields = ('email', 'first_name', 'last_name', 'role', 'school')
 
     def clean_password2(self):
-        # Basic password confirmation check
         password = self.cleaned_data.get('password')
         password2 = self.cleaned_data.get('password2')
         if password and password2 and password != password2:
             raise forms.ValidationError("Passwords don't match.")
         return password2
         
-# ----------------------------------------------------
-# 2. Custom User Admin Class
-# ----------------------------------------------------
 
 class CustomUserAdmin(BaseUserAdmin):
     """Admin configuration for the custom user model."""
     
-    # *** CRITICAL: Assign the custom forms to override BaseUserAdmin's defaults ***
     form = StudentManagementUserChangeForm
     add_form = StudentManagementUserCreationForm
 
@@ -79,7 +56,6 @@ class CustomUserAdmin(BaseUserAdmin):
     search_fields = ('email', 'first_name', 'last_name')
     ordering = ('email',)
     
-    # 1. Fieldsets for the 'CHANGE' view (Editing existing user)
     fieldsets = (
         (None, {'fields': ('email', 'password')}), 
         ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
@@ -89,19 +65,15 @@ class CustomUserAdmin(BaseUserAdmin):
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
     )
 
-    # 2. Fieldsets for the 'ADD' view (Creating a new user)
-    # This must still be defined, but now it references fields from the add_form
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            # Note: Fields here must match fields defined in StudentManagementUserCreationForm
             'fields': ('email', 'password', 'password2'), 
         }),
         ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser')}), 
     )
 
-# Inline models for quick access
 class StudentInline(admin.StackedInline):
     model = Student
     can_delete = False
@@ -124,9 +96,6 @@ class StudentManagementUserAdmin(CustomUserAdmin):
 admin.site.register(StudentManagementUser, StudentManagementUserAdmin)
 
 
-# ----------------------------------------------------
-# 3. Core Structure Admin (Registrations)
-# ----------------------------------------------------
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
@@ -187,9 +156,6 @@ class StudentAdmin(admin.ModelAdmin):
     get_active_rfid_card.short_description = 'Active RFID Card'
 
 
-# ----------------------------------------------------
-# 4. RFID/Attendance Admin
-# ----------------------------------------------------
 
 @admin.register(TapLog)
 class TapLogAdmin(admin.ModelAdmin):
@@ -232,9 +198,6 @@ class RFIDCardAdmin(admin.ModelAdmin):
             raise DjangoValidationError("A card cannot be assigned to both student and teacher.")
         super().save_model(request, obj, form, change)
     
-# ----------------------------------------------------
-# 5. Timetable/Subjects Admin
-# ----------------------------------------------------
 
 @admin.register(Subject)
 class SubjectAdmin(admin.ModelAdmin):
@@ -252,9 +215,6 @@ class TimetableEntryAdmin(admin.ModelAdmin):
     list_filter = ('school', 'day_of_week', 'classroom')
     list_editable = ('teacher',)
 
-# ----------------------------------------------------
-# 6. Communication/Other Admin
-# ----------------------------------------------------
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):

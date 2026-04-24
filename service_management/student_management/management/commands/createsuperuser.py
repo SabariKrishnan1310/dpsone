@@ -4,7 +4,6 @@ from student_management.models import School
 
 class Command(BaseCommand):
     def handle(self, *args, **options):
-        # Remove school prompt completely
         self.UserModel.REQUIRED_FIELDS = []
 
         school, _ = School.objects.get_or_create(

@@ -11,10 +11,8 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS('Starting focused demo data creation...'))
         User = get_user_model()
 
-        # Create Schools
         schools = [School.objects.create(name=f'School {i}', slug=f'school-{i}') for i in range(1, 2)]
 
-        # Create Classrooms
         classrooms = []
         for school in schools:
             for grade in range(1, 13):
@@ -23,7 +21,6 @@ class Command(BaseCommand):
                         school=school, grade=grade, section=section, room_number=f'{grade}{section}'
                     ))
 
-        # Create Teachers
         teachers = []
         for school in schools:
             for i in range(1, 11):
@@ -44,7 +41,6 @@ class Command(BaseCommand):
                     is_active=True
                 ))
 
-        # Create Parents
         parents = []
         for school in schools:
             for i in range(1, 21):
@@ -64,7 +60,6 @@ class Command(BaseCommand):
                     relation=random.choice(['MOTHER', 'FATHER', 'GUARDIAN'])
                 ))
 
-        # Create Students
         students = []
         for school in schools:
             for i in range(1, 51):
@@ -93,7 +88,6 @@ class Command(BaseCommand):
                     is_active=True
                 ))
 
-        # Create RFID Cards for students
         for student in students:
             RFIDCard.objects.create(
                 school=student.school,

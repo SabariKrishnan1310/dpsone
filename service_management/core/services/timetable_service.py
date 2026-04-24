@@ -38,23 +38,17 @@ class TimetableService:
         Checks for any existing timetable entries that overlap with the proposed slot.
         """
         
-        # 1. Self-Correction/Validation for Time Strings (Assuming Django TimeField)
         try:
-            # Simple check that times can be interpreted
             datetime.strptime(start_time, "%H:%M:%S")
             datetime.strptime(end_time, "%H:%M:%S")
         except ValueError:
             raise ValidationError("Time must be provided in 'HH:MM:SS' format.")
         
-        # 2. Look for overlapping entries
-        # Overlap logic: (start_A < end_B) AND (end_A > start_B)
         
         conflict_query = TimetableEntry.objects.filter(
             school=school,
             day_of_week=day_of_week,
-            # The new slot starts before the existing slot ends
             start_time__lt=end_time,
-            # The new slot ends after the existing slot starts
             end_time__gt=start_time
         )
         
@@ -79,30 +73,24 @@ class TimetableService:
         """
         Creates a new timetable entry after checking for time conflicts across all resources.
         """
-        # 1. Validation and Resource Retrieval
         school = cls._validate_school_context(school_id)
         teacher = cls._get_resource_by_id(Teacher, teacher_id, school, 'Teacher')
         classroom = cls._get_resource_by_id(Classroom, classroom_id, school, 'Classroom')
         subject = cls._get_resource_by_id(Subject, subject_id, school, 'Subject')
         
-        # 2. Business Rule: Resource Conflict Checks
         
-        # Check 2a: Teacher conflict
         teacher_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time).filter(teacher=teacher)
         if teacher_conflicts.exists():
             raise BusinessRuleViolation(
                 f"Teacher {teacher.last_name} is already booked for an overlapping slot."
             )
 
-        # Check 2b: Classroom conflict
-        # A physical classroom can only hold one class at a time.
         classroom_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time).filter(classroom=classroom)
         if classroom_conflicts.exists():
             raise BusinessRuleViolation(
                 f"Classroom {classroom.room_number} is already booked for an overlapping slot."
             )
 
-        # 3. Execution (Creation)
         entry = TimetableEntry.objects.create(
             school=school,
             day_of_week=day_of_week,
@@ -124,14 +112,12 @@ class TimetableService:
         entry = get_object_or_404(TimetableEntry, pk=entry_id)
         school = entry.school
         
-        # Pull existing values for fields that might not be updated
         day_of_week = update_data.get('day_of_week', entry.day_of_week)
         start_time = update_data.get('start_time', entry.start_time.isoformat())
         end_time = update_data.get('end_time', entry.end_time.isoformat())
         teacher = entry.teacher # Default to existing teacher
         classroom = entry.classroom # Default to existing classroom
         
-        # 1. Resolve potential resource changes
         if 'teacher_id' in update_data:
             teacher = cls._get_resource_by_id(Teacher, update_data['teacher_id'], school, 'Teacher')
             entry.teacher = teacher
@@ -141,23 +127,19 @@ class TimetableService:
         if 'subject_id' in update_data:
             entry.subject = cls._get_resource_by_id(Subject, update_data['subject_id'], school, 'Subject')
 
-        # 2. Business Rule: Re-check conflicts (Excluding the current entry being updated)
         
-        # Check 2a: Teacher conflict
         teacher_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time, exclude_id=entry_id).filter(teacher=teacher)
         if teacher_conflicts.exists():
             raise BusinessRuleViolation(
                 f"Update failed: Teacher {teacher.last_name} is already booked for an overlapping slot."
             )
 
-        # Check 2b: Classroom conflict
         classroom_conflicts = cls._check_time_conflict(school, day_of_week, start_time, end_time, exclude_id=entry_id).filter(classroom=classroom)
         if classroom_conflicts.exists():
             raise BusinessRuleViolation(
                 f"Update failed: Classroom {classroom.room_number} is already booked for an overlapping slot."
             )
 
-        # 3. Execution (Apply remaining updates and save)
         entry.day_of_week = day_of_week
         entry.start_time = start_time
         entry.end_time = end_time

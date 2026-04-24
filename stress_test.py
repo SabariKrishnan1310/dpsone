@@ -4,17 +4,14 @@ import json
 from datetime import datetime, timezone
 import os
 
-# --- CONFIG ---
 API_URL = "http://localhost:8000/iot/tap"  # FastAPI endpoint
 RFID_COUNT = 50  # Number of RFID tags to simulate (matches demo_data.py)
 TAPS_PER_RFID = 1  # Number of taps per RFID
 
-# --- Generate the same RFID tag IDs as demo_data.py ---
 def generate_rfids():
     rfids = [f"RFID{i}school-1" for i in range(1, RFID_COUNT + 1)]
     return rfids
 
-# --- Main stress test ---
 def main():
     rfids = generate_rfids()
     for rfid_uid in rfids:

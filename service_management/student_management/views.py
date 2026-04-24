@@ -1,4 +1,3 @@
-# service_management/student_management/views.py
 from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework.exceptions import NotFound
@@ -17,7 +16,6 @@ class StudentLookupView(generics.RetrieveAPIView):
         rfid_uid = self.kwargs.get('rfid_uid')
         
         try:
-            # Look up via RFIDCard relationship
             rfid_card = RFIDCard.objects.select_related(
                 'assigned_to_student',
                 'assigned_to_student__school'
@@ -49,7 +47,6 @@ class AttendanceRecordsView(generics.ListAPIView):
     def get_queryset(self):
         queryset = AttendanceRecord.objects.select_related('student', 'student__classroom').all()
 
-        # Filters
         classroom_id = self.request.query_params.get('classroom_id')
         grade = self.request.query_params.get('grade')
         section = self.request.query_params.get('section')
@@ -67,10 +64,8 @@ class AttendanceRecordsView(generics.ListAPIView):
         if end_date:
             queryset = queryset.filter(date__lte=end_date)
 
-        # Order by date descending
         return queryset.order_by('-date', 'student__last_name')
 
-# service_management/student_management/views.py
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -106,7 +101,6 @@ def attendance_records(request):
         })
     
     return Response(data)
-# student_management/views.py (add this at the bottom)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -133,14 +127,11 @@ class LiveAttendanceAnalyticsView(APIView):
         else:
             filter_date = timezone.now().date()
         
-        # Base queryset: today's attendance records
         queryset = AttendanceRecord.objects.filter(date=filter_date)
         
-        # Optional classroom filter
         if classroom_id:
             queryset = queryset.filter(student__classroom_id=classroom_id)
         
-        # Serialize to simple JSON
         data = [
             {
                 "student_name": f"{record.student.first_name} {record.student.last_name}",
