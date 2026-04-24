@@ -38,15 +38,15 @@ class InventoryService:
         """
         school = cls._validate_school_context(school_id)
 
-        # 1. Validation: Price and Stock
+        
         if unit_price <= 0 or initial_stock < 0:
             raise ValidationError("Unit price must be positive and initial stock cannot be negative.")
 
-        # 2. Business Rule: Unique Item Name Check (per school)
+        
         if CanteenItem.objects.filter(school=school, name__iexact=name).exists():
             raise BusinessRuleViolation(f"Canteen item with name '{name}' already exists.")
 
-        # 3. Execution (Creation)
+        
         canteen_item = CanteenItem.objects.create(
             school=school,
             name=name,
@@ -57,7 +57,7 @@ class InventoryService:
 
         return canteen_item
 
-    # --- STOCK ADJUSTMENT AND CONSUMPTION ---
+    
 
     @classmethod
     @transaction.atomic
@@ -75,7 +75,7 @@ class InventoryService:
         """
         item = get_object_or_404(CanteenItem, pk=item_id)
         
-        # 1. Validation: Quantity and Transaction Type
+        
         if quantity <= 0:
             raise ValidationError("Quantity must be positive.")
             
@@ -83,24 +83,24 @@ class InventoryService:
         if transaction_type not in valid_types:
              raise ValidationError(f"Invalid transaction type. Must be one of {', '.join(valid_types)}")
 
-        # 2. Business Rule: Inventory Stock Constraint (for removal/consumption)
+        
         if transaction_type == InventoryTransaction.TRANSACTION_TYPE_REMOVAL:
             if item.current_stock < quantity:
                 raise BusinessRuleViolation(
                     f"Inventory Stock Constraint Violated: Only {item.current_stock} of '{item.name}' available, cannot remove {quantity}."
                 )
 
-        # 3. Execution (Stock Update)
+        
         if transaction_type == InventoryTransaction.TRANSACTION_TYPE_ADDITION:
             item.current_stock += quantity
             new_balance = item.current_stock
-        else: # REMOVAL (Consumption, wastage, sale)
+        else: 
             item.current_stock -= quantity
             new_balance = item.current_stock
 
         item.save(update_fields=['current_stock'])
 
-        # 4. Create Auditable Transaction Record
+        
         transaction_record = InventoryTransaction.objects.create(
             school=item.school,
             item=item,
@@ -122,22 +122,22 @@ class InventoryService:
         """
         item = get_object_or_404(CanteenItem, pk=item_id)
         
-        # 1. Validation: Stock Constraint
+        
         if item.current_stock < quantity:
             raise BusinessRuleViolation(
                 f"Cannot process sale: Only {item.current_stock} available, requested {quantity}."
             )
 
-        # 2. Side Effect: Call Finance Service to handle wallet debit
-        # NOTE: This enforces the constraint that money must be handled FIRST.
-        # total_cost = item.unit_price * quantity
-        # from .finance_service import FinanceService
-        # try:
-        #     FinanceService.process_canteen_purchase(student_id, total_cost, item_id)
-        # except BusinessRuleViolation as e:
-        #     raise e # Re-raise if fund check failed in finance service
+        
+        
+        
+        
+        
+        
+        
+        
 
-        # 3. Execution (Stock Removal)
+        
         return cls.adjust_stock(
             item_id=item_id,
             quantity=quantity,

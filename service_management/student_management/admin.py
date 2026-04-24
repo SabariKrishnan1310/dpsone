@@ -152,9 +152,39 @@ class ParentAdmin(admin.ModelAdmin):
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display = ('last_name', 'first_name', 'classroom', 'roll_number', 'rfid_uid', 'is_active')
+    list_display = ('roll_number', 'last_name', 'first_name', 'classroom', 'get_rfid_status', 'is_active')
     list_filter = ('school', 'classroom', 'is_active')
-    search_fields = ('last_name', 'rfid_uid', 'admission_number')
+    search_fields = ('last_name', 'admission_number')
+    readonly_fields = ('get_active_rfid_card',)
+    
+    fieldsets = (
+        ('Personal Info', {
+            'fields': ('first_name', 'last_name', 'dob', 'gender', 'blood_group', 'photo_url')
+        }),
+        ('Enrollment', {
+            'fields': ('school', 'classroom', 'parent', 'admission_number', 'roll_number', 'is_active')
+        }),
+        ('RFID Info (Read-Only)', {
+            'fields': ('get_active_rfid_card',),
+            'description': 'RFID cards are linked via the RFIDCard model. Use the RFIDCard admin below to assign cards.'
+        }),
+    )
+    
+    def get_rfid_status(self, obj):
+        """Display RFID assignment status"""
+        rfid_card = obj.rfid_cards.filter(status='ACTIVE').first()
+        if rfid_card:
+            return f"✅ {rfid_card.uid}"
+        return "❌ No Active Card"
+    get_rfid_status.short_description = 'RFID Card Status'
+    
+    def get_active_rfid_card(self, obj):
+        """Display active RFID card details"""
+        rfid_card = obj.rfid_cards.filter(status='ACTIVE').first()
+        if rfid_card:
+            return f"UID: {rfid_card.uid} | Status: {rfid_card.status} | Issued: {rfid_card.issued_at}"
+        return "No active RFID card assigned"
+    get_active_rfid_card.short_description = 'Active RFID Card'
 
 
 # ----------------------------------------------------
@@ -178,8 +208,29 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
 @admin.register(RFIDCard)
 class RFIDCardAdmin(admin.ModelAdmin):
     list_display = ('uid', 'status', 'assigned_to_student', 'assigned_to_teacher', 'issued_at')
-    list_filter = ('school', 'status')
-    search_fields = ('uid',)
+    list_filter = ('school', 'status', 'issued_at')
+    search_fields = ('uid', 'assigned_to_student__last_name', 'assigned_to_teacher__last_name')
+    
+    fieldsets = (
+        ('Card Information', {
+            'fields': ('school', 'uid', 'status')
+        }),
+        ('Assignments', {
+            'fields': ('assigned_to_student', 'assigned_to_teacher'),
+            'description': 'A card can be assigned to either a student OR a teacher, not both.'
+        }),
+        ('Timestamps', {
+            'fields': ('issued_at',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def save_model(self, request, obj, form, change):
+        """Validation: Ensure card is only assigned to one person"""
+        if obj.assigned_to_student and obj.assigned_to_teacher:
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            raise DjangoValidationError("A card cannot be assigned to both student and teacher.")
+        super().save_model(request, obj, form, change)
     
 # ----------------------------------------------------
 # 5. Timetable/Subjects Admin

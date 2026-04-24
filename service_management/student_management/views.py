@@ -1,31 +1,40 @@
 # service_management/student_management/views.py
 from rest_framework import generics
 from rest_framework.response import Response
-from .models import Student
-from .serializers import StudentLookupSerializer
 from rest_framework.exceptions import NotFound
+from .models import Student, RFIDCard, AttendanceRecord
+from .serializers import StudentLookupSerializer, AttendanceRecordSerializer
 
 class StudentLookupView(generics.RetrieveAPIView):
     """
     API endpoint to look up a student's basic details (role, school_id)
     based on their RFID UID. Used by the Ingestion API for data enrichment.
+    Now looks up via RFIDCard relationship instead of Student.rfid_uid.
     """
-    queryset = Student.objects.all()
     serializer_class = StudentLookupSerializer
-    lookup_field = 'rfid_uid'
-
-    def retrieve(self, request, *args, **kwargs):
+    
+    def get_object(self):
+        rfid_uid = self.kwargs.get('rfid_uid')
+        
         try:
-            instance = self.get_object()
-            # Ensure the user object is also present (as it's used in the serializer)
-            if not instance.user:
-                 raise NotFound("Student found, but has no linked user account.")
-        except NotFound:
-            # Return a simple 404 response if the student isn't found
-            raise NotFound("Student not found with this RFID UID.")
-
-        serializer = self.get_serializer(instance)
-        return Response(serializer.data)
+            # Look up via RFIDCard relationship
+            rfid_card = RFIDCard.objects.select_related(
+                'assigned_to_student',
+                'assigned_to_student__school'
+            ).get(
+                uid=rfid_uid,
+                status='ACTIVE'
+            )
+            
+            student = rfid_card.assigned_to_student
+            
+            if not student:
+                raise NotFound(detail="RFID card exists but not assigned to any student.")
+            
+            return student
+            
+        except RFIDCard.DoesNotExist:
+            raise NotFound(detail=f"No active RFID card found with UID: {rfid_uid}")
 from rest_framework import generics
 from .models import AttendanceRecord
 from .serializers import AttendanceRecordSerializer

@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.shortcuts import get_object_or_404
-from student_management.models import Student, Classroom, Parent, School
+from student_management.models import Student, Classroom, Parent, School, RFIDCard
 from core.services.exceptions import (
     ValidationError, 
     ResourceNotFoundError, 
@@ -43,14 +43,11 @@ class StudentService:
         return classroom
     
     @staticmethod
-    def _validate_unique_enrollment(school: School, admission_number: str, rfid_uid: str = None):
+    def _validate_unique_enrollment(school: School, admission_number: str):
         """Checks for uniqueness of critical enrollment fields within the school."""
         
         if Student.objects.filter(school=school, admission_number=admission_number).exists():
             raise DuplicateEntryError(f"Admission number '{admission_number}' is already taken.")
-            
-        if rfid_uid and Student.objects.filter(school=school, rfid_uid=rfid_uid).exists():
-            raise DuplicateEntryError(f"RFID UID '{rfid_uid}' is already assigned to a student.")
             
     @classmethod
     @transaction.atomic
@@ -79,11 +76,10 @@ class StudentService:
             if not student_data.get(field):
                 raise ValidationError(f"Missing required field: {field}")
                 
-        # 2. Business Rule Validation
+        # 2. Business Rule Validation (admission_number only, RFID handled separately)
         cls._validate_unique_enrollment(
             school=school, 
-            admission_number=student_data.get('admission_number'),
-            rfid_uid=student_data.get('rfid_uid')
+            admission_number=student_data.get('admission_number')
         )
 
         # 3. Execution (Creation)
@@ -93,11 +89,73 @@ class StudentService:
             parent=parent,
             first_name=student_data['first_name'],
             last_name=student_data['last_name'],
+            dob=student_data.get('dob'),
             admission_number=student_data['admission_number'],
             roll_number=student_data.get('roll_number'),
-            rfid_uid=student_data.get('rfid_uid', ''), # Allow blank if not provided
+            gender=student_data.get('gender'),
             is_fully_enrolled=True # Assuming enrollment means they are active
         )
+        
+        return student
+
+    @classmethod
+    @transaction.atomic
+    def assign_rfid_card_to_student(cls, student_id: int, rfid_uid: str) -> Student:
+        """
+        Link an RFID card to a student (separate step from enrollment).
+        Can reassign cards between students if needed.
+        """
+        student = get_object_or_404(Student, pk=student_id)
+        school = student.school
+        
+        # 1. Validate RFID UID is not already assigned to another student in the school
+        existing_card = RFIDCard.objects.filter(
+            school=school, 
+            uid=rfid_uid,
+            assigned_to_student__isnull=False
+        ).exclude(assigned_to_student=student).first()
+        
+        if existing_card:
+            raise DuplicateEntryError(
+                f"RFID UID '{rfid_uid}' is already assigned to {existing_card.assigned_to_student.last_name}."
+            )
+        
+        # 2. Get or create RFIDCard
+        rfid_card, created = RFIDCard.objects.get_or_create(
+            school=school,
+            uid=rfid_uid,
+            defaults={
+                'assigned_to_student': student,
+                'status': 'ACTIVE'
+            }
+        )
+        
+        # 3. If card exists but unassigned or assigned to different student, update it
+        if not created:
+            old_student = rfid_card.assigned_to_student
+            if rfid_card.assigned_to_student != student:
+                rfid_card.assigned_to_student = student
+                rfid_card.status = 'ACTIVE'
+                rfid_card.save(update_fields=['assigned_to_student', 'status'])
+        
+        return student
+
+    @classmethod
+    @transaction.atomic
+    def unassign_rfid_card_from_student(cls, student_id: int) -> Student:
+        """
+        Remove RFID card assignment from a student (e.g., lost card, graduated).
+        Marks all active RFID cards as lost/inactive.
+        """
+        student = get_object_or_404(Student, pk=student_id)
+        
+        # Mark all active RFID cards as lost
+        RFIDCard.objects.filter(
+            assigned_to_student=student,
+            status='ACTIVE'
+        ).update(status='LOST')
+        
+        return student
         
         # 4. Side Effect (Optional: Send welcome email to parent)
         # MessagingService.send_enrollment_confirmation(parent, student)

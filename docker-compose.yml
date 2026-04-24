@@ -66,6 +66,9 @@ services:
       POSTGRES_USER: dps_one
       POSTGRES_PASSWORD: strong_dps_one
 
+    volumes:
+      - ./service_management/staticfiles:/usr/src/app/staticfiles
+
   management_worker:
     build:
       context: ./service_management
@@ -95,6 +98,7 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: dps_core.settings
       REDIS_HOST: redis
+
 
 volumes:
   postgres_data:

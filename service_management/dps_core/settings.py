@@ -17,6 +17,7 @@ ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
     "dps_management_web",
+    "*",
 ]
 
 
@@ -26,7 +27,7 @@ ALLOWED_HOSTS = [
 INSTALLED_APPS = [
     # LOCAL APPS
     'student_management.apps.StudentManagementConfig',
-
+    'auditlog',
     # THIRD PARTY
     'channels',
     'rest_framework',
@@ -118,7 +119,8 @@ USE_TZ = True
 # -------------------------------------------------
 # STATIC FILES
 # -------------------------------------------------
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = '/usr/src/app/staticfiles'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # -------------------------------------------------

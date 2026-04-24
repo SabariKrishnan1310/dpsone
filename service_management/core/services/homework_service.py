@@ -32,7 +32,7 @@ class HomeworkService:
         except model.DoesNotExist:
             raise ResourceNotFoundError(f"{resource_name} ID {pk} not found in school {school.pk}.")
 
-    # --- ASSIGNMENT CREATION ---
+    
 
     @classmethod
     @transaction.atomic
@@ -54,7 +54,7 @@ class HomeworkService:
         teacher = cls._get_resource_by_id(Teacher, teacher_id, school, 'Teacher')
         subject = cls._get_resource_by_id(Subject, subject_id, school, 'Subject')
         
-        # 1. Validation: Due Date and Marks
+        
         try:
             due_date = datetime.strptime(due_date_str, "%Y-%m-%d").date()
         except ValueError:
@@ -66,13 +66,13 @@ class HomeworkService:
         if max_marks <= 0:
             raise ValidationError("Maximum marks must be positive.")
 
-        # 2. Validation: Classroom Links
+        
         classrooms = []
         for cid in classroom_ids:
-            # Re-use the existing resource fetcher to ensure classroom is valid for the school
+            
             classrooms.append(cls._get_resource_by_id(Classroom, cid, school, 'Classroom'))
 
-        # 3. Execution (Creation)
+        
         homework = Homework.objects.create(
             school=school,
             teacher=teacher,
@@ -83,15 +83,15 @@ class HomeworkService:
             max_marks=max_marks
         )
         
-        # Link to all specified classrooms
+        
         homework.classrooms.set(classrooms)
         
-        # 4. Side Effect: Notification trigger for students/parents in those classrooms
-        # NotificationService.notify_new_homework(homework)
+        
+        
         
         return homework
 
-    # --- STUDENT SUBMISSION ---
+    
 
     @classmethod
     @transaction.atomic
@@ -106,25 +106,25 @@ class HomeworkService:
         except Student.DoesNotExist:
             raise ResourceNotFoundError(f"Student ID {student_id} not found in school {homework.school.name}.")
 
-        # 1. Business Rule: Check Enrollment/Assignment
+        
         if student.classroom not in homework.classrooms.all():
             raise BusinessRuleViolation(
                 f"Student {student.admission_number} is not assigned this homework."
             )
             
-        # 2. Business Rule: Deadline Check
+        
         if date.today() > homework.due_date:
             submission_data['is_late'] = True
         else:
             submission_data['is_late'] = False
         
-        # 3. Business Rule: Prevent Multiple Submissions (if submission already exists)
+        
         if HomeworkSubmission.objects.filter(homework=homework, student=student).exists():
-            # A production system might allow overwriting or create a new versioned submission.
-            # For simplicity, we enforce one submission per student here.
+            
+            
             raise BusinessRuleViolation("Student has already submitted this homework.")
 
-        # 4. Execution (Creation)
+        
         submission = HomeworkSubmission.objects.create(
             homework=homework,
             student=student,
@@ -136,7 +136,7 @@ class HomeworkService:
         
         return submission
 
-    # --- TEACHER GRADING ---
+    
 
     @classmethod
     @transaction.atomic
@@ -148,27 +148,27 @@ class HomeworkService:
         homework = submission.homework
         school = homework.school
         
-        # 1. Validation: Grader Authorization (Must be the assigning teacher or an authorized admin)
+        
         grader = cls._get_resource_by_id(StudentManagementUser, grader_id, school, 'User')
         
-        # Simple check: Grader must be the teacher who assigned the homework
+        
         if grader.teacher != homework.teacher and not grader.is_admin:
             raise BusinessRuleViolation("Grader is not authorized to mark this submission.")
 
-        # 2. Validation: Marks Constraint
+        
         if marks_obtained < 0 or marks_obtained > homework.max_marks:
             raise ValidationError(
                 f"Marks obtained ({marks_obtained}) must be between 0 and the max marks ({homework.max_marks})."
             )
 
-        # 3. Execution (Update Submission)
+        
         submission.marks_obtained = marks_obtained
         submission.feedback = feedback
         submission.graded_at = datetime.now()
         submission.is_graded = True
         submission.save(update_fields=['marks_obtained', 'feedback', 'graded_at', 'is_graded'])
         
-        # 4. Side Effect: Notify student/parent of the grade
-        # NotificationService.notify_grade_released(submission)
+        
+        
 
         return submission
