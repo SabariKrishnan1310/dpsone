@@ -12,7 +12,7 @@ import asyncio
 import httpx
 
 
-app = FastAPI(title="DPS ONE Ingestion API (Phase 1)")
+app = FastAPI(title="SterlingONE Ingestion API (Phase 1)")
 
 
 REDIS_HOST = os.environ.get("REDIS_HOST")

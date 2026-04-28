@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>DPS E-City 9 | Ghosted Emblem Generator</title>
+    <title>SterlingONE 9 | Ghosted Emblem Generator</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
@@ -95,8 +95,8 @@
 <body>
 
     <div class="controls">
-        <h1>DPS E-City Ghosted Emblems</h1>
-        <p>Ensure <b>dps-crest.png</b> is in the same folder!</p>
+        <h1>SterlingONE Ghosted Emblems</h1>
+        <p>Ensure <b>sterlingone-crest.png</b> is in the same folder!</p>
         <button id="downloadBtn" onclick="generateAndZip()">Generate Logos (ZIP)</button>
         <p id="status"></p>
     </div>
@@ -120,14 +120,14 @@
                 // Construct the integrated layered layout
                 logoDiv.innerHTML = `
                     <div class="crest-frame-bg">
-                        <img src="dps-crest.png" class="crest-img" alt="DPS Crest">
+                        <img src="sterlingone-crest.png" class="crest-img" alt="DPS Crest">
                     </div>
                     <div class="main-branding-block">
                         <h1 class="section-display">
                             9 ${section}
                         </h1>
                         <div class="school-label">
-                            DPS E-City
+                            SterlingONE
                         </div>
                     </div>
                 `;
@@ -140,18 +140,18 @@
             downloadBtn.disabled = true;
             statusText.innerText = "Processing high-res logos (Scale x2)...";
             const zip = new JSZip();
-            const folder = zip.folder("DPS_ECity_9_GhostedLogos");
+            const folder = zip.folder("SterlingONE_9_GhostedLogos");
 
             for (const section of sections) {
                 const element = document.getElementById(`logo-${section}`);
                 const canvas = await html2canvas(element, { backgroundColor: '#ffffff', scale: 2 });
                 const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-                folder.file(`DPSECity_9${section}_Emblem.png`, blob);
+                folder.file(`SterlingONE_9${section}_Emblem.png`, blob);
             }
 
             statusText.innerText = "Packing ZIP file...";
             zip.generateAsync({type:"blob"}).then(function(content) {
-                saveAs(content, "DPS_ECity_9_GhostedLogos.zip");
+                saveAs(content, "SterlingONE_9_GhostedLogos.zip");
                 statusText.innerText = "Logos Downloaded!";
                 downloadBtn.disabled = false;
             });

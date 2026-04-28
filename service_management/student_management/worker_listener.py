@@ -5,7 +5,7 @@ import time
 import django
 from student_management.tasks import process_tap_from_queue
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
 django.setup() 
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "redis") 

@@ -258,15 +258,11 @@ class RFIDCard(models.Model):
         unique_together = ('school', 'uid')
         verbose_name = "RFID Card"
         verbose_name_plural = "RFID Cards"
-        ordering = ['-issued_at']
+        ordering = ['uid']
         indexes = [
             models.Index(fields=['school', 'uid', 'status']),
             models.Index(fields=['assigned_to_student', 'status']),
         ]
-    
-    class Meta:
-        unique_together = ('school', 'uid')
-        ordering = ['uid']
 
     def __str__(self):
         return f"Card {self.uid} ({self.status})"

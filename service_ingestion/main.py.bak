@@ -12,7 +12,7 @@ import asyncio
 import httpx
 
 # --- Setup ---
-app = FastAPI(title="DPS ONE Ingestion API (Phase 1)")
+app = FastAPI(title="SterlingONE Ingestion API (Phase 1)")
 
 # 1. Initialize Redis Connections
 REDIS_HOST = os.environ.get("REDIS_HOST")
@@ -63,7 +63,7 @@ def receive_tap(data: TapData, db: Session = Depends(get_db)):
 
 # 1. API Call for Data Enrichment (Lookup to Django Management Service)
     # Use the container name defined in docker-compose.yml
-    DJANGO_LOOKUP_URL = f"http://dps_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
+    DJANGO_LOOKUP_URL = f"http://sterlingone_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
     try:
         # Use httpx to synchronously call the Django API
         response = httpx.get(DJANGO_LOOKUP_URL)

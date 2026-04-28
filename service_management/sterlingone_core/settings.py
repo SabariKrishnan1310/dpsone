@@ -3,7 +3,7 @@ from decouple import config
 from pathlib import Path
 
 """
-Django settings for dps_core project.
+Django settings for sterlingone_core project.
 """
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -13,7 +13,7 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
-    "dps_management_web",
+    "sterlingone_management_web",
     "*",
 ]
 
@@ -43,10 +43,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-ROOT_URLCONF = 'dps_core.urls'
-ASGI_APPLICATION = 'service_management.asgi.application'
+ROOT_URLCONF = 'sterlingone_core.urls'
+ASGI_APPLICATION = 'sterlingone_core.asgi.application'
 
-WSGI_APPLICATION = 'dps_core.wsgi.application'
+WSGI_APPLICATION = 'sterlingone_core.wsgi.application'
 
 TEMPLATES = [
     {
