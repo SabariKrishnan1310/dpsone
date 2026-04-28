@@ -1,12 +1,12 @@
-# service_management/student_management/models.py (FINAL CORRECTED VERSION)
-
+from auditlog.registry import auditlog
+from auditlog.models import AuditlogHistoryField
 from django.db import models
-# Import necessary classes for custom user
+
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager 
 from django.utils import timezone 
 from django.utils.translation import gettext_lazy as _ 
 
-# --- Utility Choices ---
+
 GENDER_CHOICES = [('M', 'Male'), ('F', 'Female'), ('O', 'Other')]
 RELATION_CHOICES = [('MOTHER', 'Mother'), ('FATHER', 'Father'), ('GUARDIAN', 'Guardian')]
 CARD_STATUS_CHOICES = [('ACTIVE', 'Active'), ('LOST', 'Lost'), ('DAMAGED', 'Damaged')]
@@ -17,11 +17,20 @@ TRANSACTION_TYPE_CHOICES = [('CREDIT', 'Credit (Deposit)'), ('DEBIT', 'Debit (Pu
 DEVICE_STATUS_CHOICES = [('ONLINE', 'Online'), ('OFFLINE', 'Offline'), ('ERROR', 'Error')]
 DEVICE_TYPE_CHOICES = [('GATE', 'Main Gate Reader'), ('LIBRARY', 'Library Scanner'), ('CANTEEN', 'Canteen POS'), ('BUS', 'Bus Scanner')]
 ERROR_SEVERITY_CHOICES = [('LOW', 'Low'), ('MEDIUM', 'Medium'), ('HIGH', 'High'), ('CRITICAL', 'Critical')]
-# ---
+class SoftDeleteModel(models.Model):
+    is_deleted = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
 
-# =========================================================================
-# 1. CORE TENANCY MODEL
-# =========================================================================
+    class Meta:
+        abstract = True
+
+    def delete(self, using=None, keep_parents=False):
+        self.is_deleted = True
+        self.deleted_at = timezone.now()
+        self.save(update_fields=['is_deleted', 'deleted_at'])
+
+    def hard_delete(self, using=None, keep_parents=False):
+        super().delete(using=using, keep_parents=keep_parents)
 
 class School(models.Model):
     """The top-level organizational unit for multi-tenancy."""
@@ -36,18 +45,14 @@ class School(models.Model):
     def __str__(self):
         return self.name
 
-# =========================================================================
-# 2. AUTH / CUSTOM USER MODEL 
-# =========================================================================
-
 class StudentManagementUserManager(BaseUserManager):
     """Custom user model manager where email is the unique identifier."""
-    # Note: The school parameter is optional for create_superuser for bootstrapping.
+    
     def create_user(self, email, password, school=None, role='Student', **extra_fields):
         if not email:
             raise ValueError(_('The Email must be set'))
         if not school:
-            # Handle case where school is not provided (e.g., during superuser creation)
+            
             try:
                 school = School.objects.get(slug='default-school')
             except School.DoesNotExist:
@@ -56,7 +61,7 @@ class StudentManagementUserManager(BaseUserManager):
         email = self.normalize_email(email)
         user = self.model(email=email, school=school, role=role, **extra_fields)
         user.set_password(password)
-        user.save(using=self._db) # Use save(using=self._db)
+        user.save(using=self._db) 
         return user
 
     def create_superuser(self, email, password, **extra_fields):
@@ -64,7 +69,7 @@ class StudentManagementUserManager(BaseUserManager):
         extra_fields.setdefault('is_superuser', True)
         extra_fields.setdefault('is_active', True)
 
-        # REMOVE role from extra_fields and control it explicitly
+        
         extra_fields.pop('role', None)
 
         if extra_fields.get('is_staff') is not True:
@@ -86,7 +91,7 @@ class StudentManagementUserManager(BaseUserManager):
         )
 
 
-class StudentManagementUser(AbstractBaseUser, PermissionsMixin):
+class StudentManagementUser(SoftDeleteModel, AbstractBaseUser, PermissionsMixin):
     """
     Custom user model supporting different roles (Student, Teacher, Parent, Admin).
     """
@@ -104,11 +109,13 @@ class StudentManagementUser(AbstractBaseUser, PermissionsMixin):
     is_staff = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     date_joined = models.DateTimeField(default=timezone.now)
-    # Role is now directly on the user model
+    
     role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='Student') 
     
-    # All users must belong to a school
+    
     school = models.ForeignKey(School, on_delete=models.PROTECT, related_name='users') 
+
+    history = AuditlogHistoryField()
 
     objects = StudentManagementUserManager()
 
@@ -123,13 +130,13 @@ class StudentManagementUser(AbstractBaseUser, PermissionsMixin):
         return f"{self.first_name} {self.last_name} ({self.role})"
 
 
-# =========================================================================
-# 3. SCHOOL STRUCTURE MODELS (Linking profiles to the custom user)
-# =========================================================================
+
+
+
 
 class Teacher(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='teachers') 
-    # Link to custom user model 
+    
     user = models.OneToOneField(
         StudentManagementUser, on_delete=models.CASCADE, related_name='teacher_profile', 
         null=True, blank=True, limit_choices_to={'role': 'Teacher'}
@@ -166,7 +173,7 @@ class Classroom(models.Model):
 
 class Parent(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='parents')
-    # Link to custom user model 
+    
     user = models.OneToOneField(
         StudentManagementUser, on_delete=models.CASCADE, related_name='parent_profile', 
         null=True, blank=True, limit_choices_to={'role': 'Parent'}
@@ -184,7 +191,7 @@ class Parent(models.Model):
 
 class Student(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='students')
-    # Link to custom user model
+    
     user = models.OneToOneField(
         StudentManagementUser, on_delete=models.PROTECT, related_name='student_profile', 
         null=True, blank=True, limit_choices_to={'role': 'Student'}
@@ -197,25 +204,24 @@ class Student(models.Model):
     is_fully_enrolled = models.BooleanField(default=False)
     
     classroom = models.ForeignKey(Classroom, on_delete=models.PROTECT, related_name='students')
-    # Parent FK is to the Parent Profile model
+    
     parent = models.ForeignKey(Parent, on_delete=models.PROTECT, related_name='children')
     
     photo_url = models.URLField(max_length=200, blank=True)
     gender = models.CharField(max_length=1, choices=GENDER_CHOICES)
     blood_group = models.CharField(max_length=5, blank=True)
     
-    rfid_uid = models.CharField(max_length=50, db_index=True) 
     admission_number = models.CharField(max_length=50)
     is_active = models.BooleanField(default=True)
     
     class Meta:
-        unique_together = [('school', 'admission_number'), ('school', 'rfid_uid')]
+        unique_together = [('school', 'admission_number')]
         ordering = ['roll_number']
 
     def __str__(self):
         return f"R.No {self.roll_number} - {self.last_name}"
 
-# Missing model required by TeacherService
+
 class TeacherSubjectMapping(models.Model):
     """Maps a Teacher to a Subject in a specific Classroom."""
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='teacher_subject_mappings')
@@ -229,10 +235,10 @@ class TeacherSubjectMapping(models.Model):
         verbose_name = "Teacher Subject Mapping"
         verbose_name_plural = "Teacher Subject Mappings"
 
-# =========================================================================
-# 4. RFID SYSTEM MODELS
-# ... (all other models remain the same)
-# =========================================================================
+
+
+
+
 
 class RFIDCard(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='rfid_cards')
@@ -240,17 +246,23 @@ class RFIDCard(models.Model):
     uid = models.CharField(max_length=20, db_index=True)
     
     assigned_to_student = models.ForeignKey(
-        Student, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_card'
+        Student, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_cards'
     )
     assigned_to_teacher = models.ForeignKey(
-        Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_card'
+        Teacher, on_delete=models.SET_NULL, null=True, blank=True, related_name='rfid_cards'
     )
     issued_at = models.DateTimeField(auto_now_add=True)
     status = models.CharField(max_length=20, choices=CARD_STATUS_CHOICES, default='ACTIVE')
     
     class Meta:
         unique_together = ('school', 'uid')
+        verbose_name = "RFID Card"
+        verbose_name_plural = "RFID Cards"
         ordering = ['uid']
+        indexes = [
+            models.Index(fields=['school', 'uid', 'status']),
+            models.Index(fields=['assigned_to_student', 'status']),
+        ]
 
     def __str__(self):
         return f"Card {self.uid} ({self.status})"
@@ -269,9 +281,9 @@ class TapLog(models.Model):
         verbose_name_plural = "Raw Tap Logs"
         ordering = ['-timestamp']
 
-# =========================================================================
-# 5. TIMETABLE MODELS
-# =========================================================================
+
+
+
 
 class Subject(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='subjects') 
@@ -310,14 +322,14 @@ class TimetableEntry(models.Model):
     def __str__(self):
         return f"{self.classroom.grade}-{self.classroom.section} | {self.subject.code} | Day {self.day_of_week}"
 
-# =========================================================================
-# 6. ATTENDANCE MODELS
-# =========================================================================
+
+
+
 
 class AttendanceRecord(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='attendance_records') 
     
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='attendance_records')
+    user = models.ForeignKey('StudentManagementUser', on_delete=models.CASCADE, related_name='attendance_records', db_index=True)
     date = models.DateField(db_index=True)
     period_number = models.IntegerField(null=True, blank=True)
     
@@ -329,8 +341,8 @@ class AttendanceRecord(models.Model):
     
     class Meta:
         verbose_name = "Attendance Record"
-        unique_together = ('student', 'date', 'period_number')
-        ordering = ['-date', 'student__last_name']
+        unique_together = ('user', 'date', 'period_number')
+        ordering = ['-date', 'user__last_name']
 
 class PracticeOutRecord(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='practice_out_records') 
@@ -349,9 +361,9 @@ class PracticeOutRecord(models.Model):
         verbose_name_plural = "Practice Out Records"
         ordering = ['-date']
 
-# =========================================================================
-# 7. HOMEWORK MODELS
-# =========================================================================
+
+
+
 
 class Homework(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='homework_assignments') 
@@ -386,9 +398,9 @@ class HomeworkSubmission(models.Model):
         verbose_name_plural = "Homework Submissions"
         unique_together = ('homework', 'student')
 
-# =========================================================================
-# 8. COMMUNICATION MODELS
-# =========================================================================
+
+
+
 
 class Announcement(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='announcements') 
@@ -400,7 +412,7 @@ class Announcement(models.Model):
     scope = models.CharField(max_length=10, choices=SCOPE_CHOICES, default='SCHOOL')
     
     classroom = models.ForeignKey(Classroom, on_delete=models.SET_NULL, null=True, blank=True, related_name='announcements')
-    # Link to Teacher model
+    
     created_by = models.ForeignKey(Teacher, on_delete=models.SET_NULL, null=True, related_name='posted_announcements')
     created_at = models.DateTimeField(auto_now_add=True)
     attachment_url = models.URLField(max_length=500, null=True, blank=True)
@@ -428,7 +440,7 @@ class Message(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='messages') 
     
     thread = models.ForeignKey(MessageThread, on_delete=models.CASCADE, related_name='messages')
-    # Use CharField for sender_id based on original intent, though User ForeignKey is recommended.
+    
     sender_id = models.CharField(max_length=50) 
     
     message_text = models.TextField()
@@ -440,9 +452,9 @@ class Message(models.Model):
         verbose_name_plural = "Messages"
         ordering = ['timestamp']
 
-# =========================================================================
-# 9. CANTEEN/FINANCIAL MODELS
-# =========================================================================
+
+
+
 
 class CanteenItem(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='canteen_items') 
@@ -491,9 +503,9 @@ class WalletTransaction(models.Model):
         verbose_name_plural = "Wallet Transactions"
         ordering = ['-timestamp']
 
-# =========================================================================
-# 10. LIBRARY SYSTEM MODELS
-# =========================================================================
+
+
+
 
 class Book(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='library_books') 
@@ -532,9 +544,9 @@ class BookIssue(models.Model):
         verbose_name_plural = "Book Issue Records"
         ordering = ['-issued_at']
 
-# =========================================================================
-# 11. EVENT & COMPETITION MODELS
-# =========================================================================
+
+
+
 
 class Event(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='events') 
@@ -584,9 +596,9 @@ class Certificate(models.Model):
         verbose_name_plural = "Award Certificates"
         unique_together = ('event', 'student')
 
-# =========================================================================
-# 12. EXAMS & MARKS MODELS
-# =========================================================================
+
+
+
 
 class Exam(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='exams') 
@@ -631,9 +643,9 @@ class MarkEntry(models.Model):
         verbose_name_plural = "Mark Entries"
         unique_together = ('exam_subject', 'student')
 
-# =========================================================================
-# 13. DEVICE MANAGEMENT & ANALYTICS
-# =========================================================================
+
+
+
 
 class CollectorNode(models.Model):
     school = models.ForeignKey(School, on_delete=models.CASCADE, related_name='collector_nodes') 
@@ -661,6 +673,13 @@ class ReaderDevice(models.Model):
     status = models.CharField(max_length=10, default='OK')
     last_seen = models.DateTimeField(null=True, blank=True)
     firmware_version = models.CharField(max_length=50, null=True, blank=True)
+    
+    storage_left = models.PositiveIntegerField(null=True, blank=True)
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
+    battery_voltage = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    pending_taps_count = models.PositiveIntegerField(default=0)
+    last_telemetry = models.JSONField(null=True, blank=True, help_text="Raw 18-byte headspace telemetry snapshot")
 
     class Meta:
         verbose_name = "Reader Device"
@@ -697,3 +716,6 @@ class AttendanceStatsDaily(models.Model):
         verbose_name_plural = "Daily Attendance Statistics"
         unique_together = ('school', 'date', 'classroom')
         ordering = ['-date']
+
+
+auditlog.register(StudentManagementUser)

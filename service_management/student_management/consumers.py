@@ -14,7 +14,6 @@ class LiveAttendanceConsumer(AsyncWebsocketConsumer):
         self.school_id = self.scope['url_route']['kwargs']['school_id']
         self.group_name = f"school_{self.school_id}"
 
-        # Join the group's channel
         await self.channel_layer.group_add(
             self.group_name,
             self.channel_name
@@ -24,7 +23,6 @@ class LiveAttendanceConsumer(AsyncWebsocketConsumer):
         print(f"WebSocket connected: Live Attendance for school {self.school_id}")
 
     async def disconnect(self, close_code):
-        # Leave the group
         await self.channel_layer.group_discard(
             self.group_name,
             self.channel_name
@@ -32,7 +30,6 @@ class LiveAttendanceConsumer(AsyncWebsocketConsumer):
         print(f"WebSocket disconnected: school {self.school_id}")
 
     async def receive(self, text_data=None, bytes_data=None):
-        # Dashboard does not send data
         pass
 
     async def tap_event(self, event):

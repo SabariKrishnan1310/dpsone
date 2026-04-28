@@ -3,7 +3,7 @@ import json
 import redis
 from fastapi import FastAPI, Depends, status, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
-from datetime import datetime, timezone 
+from datetime import datetime, timezone # <-- Added timezone for best practice
 import json
 from sqlalchemy.orm import Session
 from models import AttendanceLog, get_db, create_tables 
@@ -11,39 +11,39 @@ import redis.asyncio as aioredis
 import asyncio
 import httpx
 
-
+# --- Setup ---
 app = FastAPI(title="SterlingONE Ingestion API (Phase 1)")
 
-
+# 1. Initialize Redis Connections
 REDIS_HOST = os.environ.get("REDIS_HOST")
-
+# Synchronous client for the API endpoint
 sync_redis = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
-
+# Asynchronous client for the WebSocket listener
 async def get_async_redis_client():
     return aioredis.from_url(f"redis://{REDIS_HOST}:6379", decode_responses=True)
 
 
-
+# 2. Pydantic Model for incoming data (Input Validation)
 class TapData(BaseModel):
     rfid_uid: str
     device_id: str
     status: str = "IN" 
 
-    
+    # --- NEW FIELDS ADDED for enriched data ---
     school_id: str
     location: str | None = None
-    
+    # Use UTC for consistency
     cur_time: datetime = Field(alias="current_time", default_factory=lambda: datetime.now(timezone.utc)) 
     role: str = "STUDENT"
-    
+    # -------------------------------------------
 
-
+# 3. Startup Event: Create Database Tables
 @app.on_event("startup")
 def on_startup():
-    
+    # Ensure tables are created when the container starts
     create_tables()
 
-
+# 4. Health Check Endpoint
 @app.get("/")
 def read_root():
     return {"status": "Ingestion API Running", "message": "Ready to receive taps."}
@@ -55,32 +55,45 @@ def receive_tap(data: TapData, db: Session = Depends(get_db)):
     Receives an RFID tap, looks up user details from Django (Data Enrichment),
     logs the enriched data to PostgreSQL, and publishes to Redis.
     """
-    DJANGO_LOOKUP_URL = f"http://nginx/api/v1/lookup/{data.rfid_uid}/"
+    
+    # 1. API Call for Data Enrichment (Lookup to Django Management Service)
+    # Uses the standardized service name and internal port (8000)
+    # service_ingestion/main.py (Inside receive_tap function)
+
+
+# 1. API Call for Data Enrichment (Lookup to Django Management Service)
+    # Use the container name defined in docker-compose.yml
+    DJANGO_LOOKUP_URL = f"http://sterlingone_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
     try:
+        # Use httpx to synchronously call the Django API
         response = httpx.get(DJANGO_LOOKUP_URL)
-        response.raise_for_status() 
+        response.raise_for_status() # Raise an exception for 4xx/5xx status codes
+        
+        # Get the enriched data from Django
         enriched_data = response.json()
+        
+        # Override the defaults in TapData with the authoritative data from Django
         data.school_id = enriched_data.get('school_id', data.school_id)
         data.role = enriched_data.get('role', data.role)
         
     except httpx.HTTPStatusError as e:
-        
+        # Student not found (404) or other HTTP error
         print(f"ERROR: Lookup failed for {data.rfid_uid}. HTTP Status: {e.response.status_code}. Using fallback data.")
-        
-        
+        # We still proceed to log the tap, but the school_id/role will use the
+        # defaults or the data provided in the original tap request ('IGNORED').
         
     except httpx.RequestError as e:
-        
+        # Network/Connection error (e.g., Django service is down)
         print(f"FATAL ERROR: Could not connect to Django Management API: {e}. Using fallback data.")
-        
+        # Proceed with logging based on request data alone
 
-    
+    # 2. Log to PostgreSQL (Data Persistence)
     new_log = AttendanceLog(
         rfid_uid=data.rfid_uid,
         device_id=data.device_id,
         status=data.status,
         
-        
+        # Use potentially enriched data
         school_id=data.school_id, 
         location=data.location,
         role=data.role,
@@ -88,19 +101,19 @@ def receive_tap(data: TapData, db: Session = Depends(get_db)):
     )
     db.add(new_log)
     db.commit()
-    db.refresh(new_log) 
+    db.refresh(new_log) # Refreshes to get log_id and database timestamp
 
-    
+    # 3. Publish to Redis (Real-Time Update Bus)
     realtime_data = {
         "log_id": new_log.log_id,
         "uid": data.rfid_uid,
         "status": data.status,
         
-        
+        # Publish enriched data
         "school": data.school_id,
         "location": data.location,
         "role": data.role,
-        "tap_time": new_log.current_time.isoformat(), 
+        "tap_time": new_log.current_time.isoformat(), # Use the time saved to DB
         
         "device": data.device_id,
         "db_time": new_log.timestamp.isoformat()
@@ -111,7 +124,7 @@ def receive_tap(data: TapData, db: Session = Depends(get_db)):
     return {"message": "Tap recorded and published", "log_id": new_log.log_id}
 
 
-
+# --- WebSocket Endpoint (Real-Time Dashboard Engine) ---
 @app.websocket("/ws/live-dashboard")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -123,12 +136,12 @@ async def websocket_endpoint(websocket: WebSocket):
         
         await websocket.send_text(json.dumps({"message": "Subscription started. Waiting for taps..."}))
         
-        
+        # Listen for messages from Redis and push them to the browser
         async for message in pubsub.listen():
             if message and message['type'] == 'message':
-                
+                # The message['data'] is the JSON string published by /iot/tap
                 try:
-                    
+                    # Send the data directly to the connected client
                     await websocket.send_text(message['data'])
                 except Exception as e:
                     print(f"Error sending message to client: {e}")

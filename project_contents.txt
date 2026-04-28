@@ -6,24 +6,24 @@ version: '3.9'
 services:
   db:
     image: postgres:16-alpine
-    container_name: dps_postgres_db
+    container_name: sterlingone_postgres_db
     environment:
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: strong_sterlingone
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U dps_one" ]
+      test: [ "CMD-SHELL", "pg_isready -U sterlingone" ]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: dps_redis_cache
+    container_name: sterlingone_redis_cache
     ports:
       - "6379:6379"
 
@@ -31,7 +31,7 @@ services:
     build:
       context: ./service_ingestion
       dockerfile: Dockerfile
-    container_name: dps_ingestion_api
+    container_name: sterlingone_ingestion_api
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
@@ -43,16 +43,16 @@ services:
     environment:
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: strong_sterlingone
 
   management_web:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_web
-    command: daphne -b 0.0.0.0 -p 8001 dps_core.asgi:application
+    container_name: sterlingone_management_web
+    command: daphne -b 0.0.0.0 -p 8001 sterlingone_core.asgi:application
 
     ports:
       - "8001:8001"
@@ -62,41 +62,41 @@ services:
       redis:
         condition: service_started
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: strong_sterlingone
 
   management_worker:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_worker
-    command: celery -A dps_core worker -l info
+    container_name: sterlingone_management_worker
+    command: celery -A sterlingone_core worker -l info
     depends_on:
       - db
       - redis
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: strong_sterlingone
 
   management_listener:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_listener
+    container_name: sterlingone_management_listener
     command: python worker_listener.py
     depends_on:
       - redis
       - management_worker
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       REDIS_HOST: redis
 
 volumes:
@@ -163,7 +163,7 @@ class AttendanceLog(Base):
     rfid_uid = Column(String, index=True, nullable=False)
     
     # --- NEW FIELDS ADDED ---
-    school_id = Column(String, nullable=False, index=True) # Identifier for the school (e.g., "DPS_001")
+    school_id = Column(String, nullable=False, index=True) # Identifier for the school (e.g., "SterlingONE_001")
     location = Column(String, nullable=True)             # User-friendly name (e.g., "Main Gate")
     role = Column(String, nullable=False, default="STUDENT") # STUDENT or STAFF
     current_time = Column(DateTime, default=datetime.utcnow) # This will store the time the DEVICE sent the tap
@@ -219,7 +219,7 @@ import asyncio
 import httpx
 
 # --- Setup ---
-app = FastAPI(title="DPS ONE Ingestion API (Phase 1)")
+app = FastAPI(title="SterlingONE Ingestion API (Phase 1)")
 
 # 1. Initialize Redis Connections
 REDIS_HOST = os.environ.get("REDIS_HOST")
@@ -270,7 +270,7 @@ def receive_tap(data: TapData, db: Session = Depends(get_db)):
 
 # 1. API Call for Data Enrichment (Lookup to Django Management Service)
     # Use the container name defined in docker-compose.yml
-    DJANGO_LOOKUP_URL = f"http://dps_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
+    DJANGO_LOOKUP_URL = f"http://sterlingone_management_web:8001/api/v1/lookup/{data.rfid_uid}/"
     try:
         # Use httpx to synchronously call the Django API
         response = httpx.get(DJANGO_LOOKUP_URL)
@@ -2104,7 +2104,7 @@ from channels.auth import AuthMiddlewareStack
 from django.core.asgi import get_asgi_application
 import student_management.routing
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dps_core.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sterlingone_core.settings")
 django.setup()
 
 application = ProtocolTypeRouter({
@@ -3282,7 +3282,7 @@ from student_management.tasks import process_tap_from_queue
 
 # --- Django Environment Setup ---
 # Initialize Django to access settings (REDIS_HOST, etc.) and run tasks
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
 django.setup() 
 # --------------------------------
 
@@ -3448,15 +3448,15 @@ def process_tap_from_queue(self, tap_data_json: str):
         print(f"CRITICAL ERROR processing {rfid_uid}: {exc}. Retrying...")
         raise self.retry(exc=exc)
 
-./service_management/dps_core/celery.py:
+./service_management/sterlingone_core/celery.py:
 import os
 from celery import Celery
 
 # Set the default Django settings module for the 'celery' program.
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
 
 # Create the Celery application instance
-app = Celery('dps_core')
+app = Celery('sterlingone_core')
 
 # Load configuration from the Django settings file, using the 'CELERY' namespace.
 # e.g., it looks for settings starting with CELERY_ (like CELERY_BROKER_URL)
@@ -3464,7 +3464,7 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 
 # Auto-discover tasks from all installed Django apps' 'tasks.py' modules.
 app.autodiscover_tasks()
-./service_management/dps_core/asgi.py:
+./service_management/sterlingone_core/asgi.py:
 import os
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
@@ -3484,16 +3484,16 @@ application = ProtocolTypeRouter({
     ),
 })
 
-./service_management/dps_core/__init__.py:
-# service_management/dps_core/__init__.py
+./service_management/sterlingone_core/__init__.py:
+# service_management/sterlingone_core/__init__.py
 
 # This ensures the Celery app is loaded when Django starts
 from .celery import app as celery_app 
 
 # Optional: define your default Django app setup here
-./service_management/dps_core/wsgi.py:
+./service_management/sterlingone_core/wsgi.py:
 """
-WSGI config for dps_core project.
+WSGI config for sterlingone_core project.
 
 It exposes the WSGI callable as a module-level variable named ``application``.
 
@@ -3505,17 +3505,17 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
 
 application = get_wsgi_application()
 
-./service_management/dps_core/settings.py:
+./service_management/sterlingone_core/settings.py:
 import os
 from decouple import config
 from pathlib import Path
 
 """
-Django settings for dps_core project.
+Django settings for sterlingone_core project.
 """
 
 # -------------------------------------------------
@@ -3528,7 +3528,7 @@ DEBUG = True
 ALLOWED_HOSTS = [
     "localhost",
     "127.0.0.1",
-    "dps_management_web",
+    "sterlingone_management_web",
 ]
 
 
@@ -3569,10 +3569,10 @@ MIDDLEWARE = [
 # -------------------------------------------------
 # URL / ASGI / WSGI
 # -------------------------------------------------
-ROOT_URLCONF = 'dps_core.urls'
+ROOT_URLCONF = 'sterlingone_core.urls'
 ASGI_APPLICATION = 'service_management.asgi.application'
 
-WSGI_APPLICATION = 'dps_core.wsgi.application'
+WSGI_APPLICATION = 'sterlingone_core.wsgi.application'
 
 # -------------------------------------------------
 # TEMPLATES
@@ -3656,8 +3656,8 @@ CHANNEL_LAYERS = {
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
-./service_management/dps_core/urls.py:
-# service_management/dps_core/urls.py (Ensure this exists)
+./service_management/sterlingone_core/urls.py:
+# service_management/sterlingone_core/urls.py (Ensure this exists)
 from django.contrib import admin
 from django.urls import path, include
 
@@ -3674,7 +3674,7 @@ import time
 import django
 
 # Set up Django environment so we can access settings and Celery tasks
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
 django.setup() 
 
 # Import the task created above
@@ -3719,7 +3719,7 @@ import sys
 
 def main():
     """Run administrative tasks."""
-    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'dps_core.settings')
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'sterlingone_core.settings')
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

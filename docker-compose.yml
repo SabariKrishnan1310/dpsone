@@ -3,24 +3,24 @@ version: '3.9'
 services:
   db:
     image: postgres:16-alpine
-    container_name: dps_postgres_db
+    container_name: sterlingone_postgres_db
     environment:
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: SterlingONE
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U dps_one" ]
+      test: [ "CMD-SHELL", "pg_isready -U sterlingone" ]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: dps_redis_cache
+    container_name: sterlingone_redis_cache
     ports:
       - "6379:6379"
 
@@ -28,7 +28,7 @@ services:
     build:
       context: ./service_ingestion
       dockerfile: Dockerfile
-    container_name: dps_ingestion_api
+    container_name: sterlingone_ingestion_api
     command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "8000:8000"
@@ -40,16 +40,16 @@ services:
     environment:
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: SterlingONE
 
   management_web:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_web
-    command: daphne -b 0.0.0.0 -p 8001 dps_core.asgi:application
+    container_name: sterlingone_management_web
+    command: daphne -b 0.0.0.0 -p 8001 sterlingone_core.asgi:application
 
     ports:
       - "8001:8001"
@@ -59,42 +59,46 @@ services:
       redis:
         condition: service_started
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: SterlingONE
+
+    volumes:
+      - ./service_management/staticfiles:/usr/src/app/staticfiles
 
   management_worker:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_worker
-    command: celery -A dps_core worker -l info
+    container_name: sterlingone_management_worker
+    command: celery -A sterlingone_core worker -l info
     depends_on:
       - db
       - redis
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
-      POSTGRES_DB: dps_one_db
-      POSTGRES_USER: dps_one
-      POSTGRES_PASSWORD: strong_dps_one
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: SterlingONE
 
   management_listener:
     build:
       context: ./service_management
       dockerfile: Dockerfile
-    container_name: dps_management_listener
+    container_name: sterlingone_management_listener
     command: python worker_listener.py
     depends_on:
       - redis
       - management_worker
     environment:
-      DJANGO_SETTINGS_MODULE: dps_core.settings
+      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
       REDIS_HOST: redis
+
 
 volumes:
   postgres_data:

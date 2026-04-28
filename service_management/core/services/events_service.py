@@ -41,7 +41,7 @@ class EventsService:
         """
         school = cls._validate_school_context(school_id)
 
-        # 1. Validation: Time and Capacity
+        
         try:
             start_time = datetime.fromisoformat(start_time_str)
             end_time = datetime.fromisoformat(end_time_str)
@@ -57,7 +57,7 @@ class EventsService:
         if max_capacity < 0:
             raise ValidationError("Max capacity cannot be negative.")
 
-        # 2. Execution (Creation)
+        
         event = Event.objects.create(
             school=school,
             title=title,
@@ -65,12 +65,12 @@ class EventsService:
             start_time=start_time,
             end_time=end_time,
             max_capacity=max_capacity,
-            current_registrations=0 # Initialized at zero
+            current_registrations=0 
         )
 
         return event
 
-    # --- REGISTRATION LOGIC ---
+    
 
     @classmethod
     @transaction.atomic
@@ -80,20 +80,20 @@ class EventsService:
         """
         event = get_object_or_404(Event, pk=event_id)
         
-        # 1. Validation: Event Timing and Status
+        
         if event.end_time < datetime.now():
             raise BusinessRuleViolation("Event registration is closed as the event has ended.")
         
         if not event.is_active:
             raise BusinessRuleViolation("Event is currently inactive and cannot accept registrations.")
 
-        # 2. Business Rule: Event Registration Limit Check
+        
         if event.max_capacity > 0 and event.current_registrations >= event.max_capacity:
             raise BusinessRuleViolation(
                 f"Event Registration Limit Violated: '{event.title}' is full (Max Capacity: {event.max_capacity})."
             )
 
-        # 3. Validation: User Existence and Role Linkage
+        
         if user_role == 'Student':
             try:
                 user_instance = Student.objects.get(pk=user_id, school=event.school)
@@ -107,24 +107,24 @@ class EventsService:
         else:
             raise ValidationError("Invalid role specified for registration.")
 
-        # 4. Business Rule: Duplicate Registration Check
+        
         if EventRegistration.objects.filter(event=event, user_role=user_role, user_id=user_id).exists():
             raise DuplicateEntryError("This user is already registered for this event.")
 
-        # 5. Execution (Creation and Counter Update)
+        
         registration = EventRegistration.objects.create(
             event=event,
             user_role=user_role,
-            user_id=user_id, # Store the actual Student/Teacher primary key here
+            user_id=user_id, 
             registered_at=datetime.now()
         )
         
-        # Safely increment the counter (essential for race condition safety if this were done outside transaction)
+        
         event.current_registrations = EventRegistration.objects.filter(event=event).count()
         event.save(update_fields=['current_registrations'])
         
-        # 6. Side Effect: Confirmation/Ticket Generation
-        # NotificationService.send_event_confirmation(registration)
+        
+        
 
         return registration
 
@@ -137,7 +137,7 @@ class EventsService:
         registration = get_object_or_404(EventRegistration, pk=registration_id)
         event = registration.event
         
-        # 1. Execution (Deletion)
+        
         registration.delete()
         
         

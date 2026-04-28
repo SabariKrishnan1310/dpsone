@@ -36,7 +36,6 @@ class ParentService:
         """
         Creates a new parent record after validating uniqueness and school context.
         """
-        # 1. Validation and Resource Retrieval
         school = cls._validate_school_context(school_id)
         
         required_fields = ['first_name', 'last_name', 'phone']
@@ -47,7 +46,6 @@ class ParentService:
         phone_number = parent_data['phone']
         cls._validate_phone_uniqueness(school, phone_number)
 
-        # 2. Execution (Creation)
         parent = Parent.objects.create(
             school=school,
             first_name=parent_data['first_name'],
@@ -57,8 +55,6 @@ class ParentService:
             is_active=True
         )
 
-        # 3. Side Effect (Optional: Create associated user account/messaging thread)
-        # UserService.create_parent_user(parent)
         
         return parent
 
@@ -70,22 +66,17 @@ class ParentService:
         This is typically used if a student's legal guardian changes.
         """
         
-        # 1. Fetch Resources
         student = get_object_or_404(Student, pk=student_id)
         parent = get_object_or_404(Parent, pk=parent_id)
         
-        # 2. Validation: Ensure both belong to the same school
         if student.school_id != parent.school_id:
             raise BusinessRuleViolation(
                 "Cannot link student and parent from different school contexts."
             )
         
-        # 3. Execution (Update)
         student.parent = parent
         student.save(update_fields=['parent'])
         
-        # 4. Side Effect (Audit log)
-        # LogService.log_event(student.school, 'PARENT_LINKAGE_UPDATE', f'Student {student.pk} assigned to new parent {parent.pk}')
         
         return student
 
@@ -99,15 +90,8 @@ class ParentService:
         """
         student = get_object_or_404(Student, pk=student_id)
         
-        # Business Rule: Parent linkage is MANDATORY (based on typical Django model ForeignKey constraint)
-        # You would typically raise an error unless the parent is being replaced.
-        # Assuming the parent field is not nullable (PROTECT):
         
         raise BusinessRuleViolation(
             "Student must always have a primary parent. Use 'link_student_to_parent' to reassign."
         )
         
-        # If the parent field was nullable, the code would be:
-        # student.parent = None
-        # student.save(update_fields=['parent'])
-        # return student

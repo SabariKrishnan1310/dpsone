@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>SterlingONE 9 | Ghosted Emblem Generator</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;800&display=swap');
+
+        body { 
+            margin: 0; padding: 20px; 
+            background-color: #f8faf9; 
+            font-family: 'Montserrat', sans-serif; 
+            color: #1a1a1a;
+            text-align: center;
+        }
+
+        .controls { margin-bottom: 20px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); display: inline-block;}
+        button { padding: 12px 24px; background: #016D39; color: white; border: none; font-size: 16px; cursor: pointer; font-weight: 800; border-radius: 4px; }
+        button:disabled { background: #a1a1a1; cursor: not-allowed; }
+
+        /* The Main Generator Container */
+        #preview-container { display: flex; flex-wrap: wrap; justify-content: center; }
+
+        /* =========================================
+           THE LOGO DESIGN (Export Area) 
+           ========================================= */
+        .logo-capture-area {
+            position: relative; /* CRITICAL: Required for stacking layers */
+            display: inline-flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 150px; /* High padding for clean circular crop */
+            background-color: #ffffff;
+            margin: 10px;
+            color: #016D39;
+        }
+
+        /* Layer 1: The "Ghosted" Background Crest */
+        .crest-frame-bg {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            opacity: 0.1; /* High transparency for the watermark effect */
+            z-index: 1; /* Sits behind everything else */
+            filter: grayscale(100%); /* Makes it neutral so it doesn't clash with the text color */
+        }
+
+        .crest-img {
+            max-width: 90%;
+            max-height: 90%;
+            width: auto; height: auto;
+        }
+
+        /* Layer 2: The Typography Foreground */
+        .main-branding-block {
+            text-align: center;
+            position: relative;
+            z-index: 10; /* Ensures text is CRISP and sits on top */
+            color: #016D39; /* Primary Text Color */
+        }
+
+        .section-display {
+            font-size: 140px;
+            font-weight: 800;
+            line-height: 0.8;
+            letter-spacing: -6px;
+            margin: 0;
+            display: flex;
+            justify-content: center;
+        }
+
+        .school-label {
+            font-size: 32px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 6px;
+            margin-top: 15px;
+            border-top: 3px solid #016D39;
+            padding-top: 15px;
+            width: 100%;
+        }
+
+    </style>
+</head>
+<body>
+
+    <div class="controls">
+        <h1>SterlingONE Ghosted Emblems</h1>
+        <p>Ensure <b>sterlingone-crest.png</b> is in the same folder!</p>
+        <button id="downloadBtn" onclick="generateAndZip()">Generate Logos (ZIP)</button>
+        <p id="status"></p>
+    </div>
+
+    <div id="preview-container"></div>
+
+    <script>
+        // Define our sections A through M
+        const sections = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M'];
+        const previewContainer = document.getElementById('preview-container');
+        const statusText = document.getElementById('status');
+        const downloadBtn = document.getElementById('downloadBtn');
+
+        // 1. Generate the visual structure for each section
+        function setupPreviews() {
+            sections.forEach(section => {
+                const logoDiv = document.createElement('div');
+                logoDiv.className = 'logo-capture-area';
+                logoDiv.id = `logo-${section}`;
+                
+                // Construct the integrated layered layout
+                logoDiv.innerHTML = `
+                    <div class="crest-frame-bg">
+                        <img src="sterlingone-crest.png" class="crest-img" alt="DPS Crest">
+                    </div>
+                    <div class="main-branding-block">
+                        <h1 class="section-display">
+                            9 ${section}
+                        </h1>
+                        <div class="school-label">
+                            SterlingONE
+                        </div>
+                    </div>
+                `;
+                previewContainer.appendChild(logoDiv);
+            });
+        }
+
+        // 2. Main export logic (ZIP PNGs)
+        async function generateAndZip() {
+            downloadBtn.disabled = true;
+            statusText.innerText = "Processing high-res logos (Scale x2)...";
+            const zip = new JSZip();
+            const folder = zip.folder("SterlingONE_9_GhostedLogos");
+
+            for (const section of sections) {
+                const element = document.getElementById(`logo-${section}`);
+                const canvas = await html2canvas(element, { backgroundColor: '#ffffff', scale: 2 });
+                const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+                folder.file(`SterlingONE_9${section}_Emblem.png`, blob);
+            }
+
+            statusText.innerText = "Packing ZIP file...";
+            zip.generateAsync({type:"blob"}).then(function(content) {
+                saveAs(content, "SterlingONE_9_GhostedLogos.zip");
+                statusText.innerText = "Logos Downloaded!";
+                downloadBtn.disabled = false;
+            });
+        }
+
+        // Run setup on load
+        setupPreviews();
+    </script>
+</body>
+</html>

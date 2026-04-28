@@ -9,3 +9,4 @@ celery
 django-redis
 channels==4.0.0
 whitenoise
+django-auditlog>=2.0.0

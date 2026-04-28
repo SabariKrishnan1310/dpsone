@@ -1,4 +1,3 @@
-# service_management/student_management/urls.py
 from django.urls import path
 from .views import StudentLookupView, attendance_records, LiveAttendanceAnalyticsView
 

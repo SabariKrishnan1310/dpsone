@@ -4,7 +4,7 @@ from channels.routing import ProtocolTypeRouter, URLRouter
 from channels.auth import AuthMiddlewareStack
 import student_management.routing
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "service_management.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sterlingone_core.settings")
 
 django_asgi_app = get_asgi_application()
 

@@ -1,31 +1,38 @@
-# service_management/student_management/views.py
 from rest_framework import generics
 from rest_framework.response import Response
-from .models import Student
-from .serializers import StudentLookupSerializer
 from rest_framework.exceptions import NotFound
+from .models import Student, RFIDCard, AttendanceRecord
+from .serializers import StudentLookupSerializer, AttendanceRecordSerializer
 
 class StudentLookupView(generics.RetrieveAPIView):
     """
     API endpoint to look up a student's basic details (role, school_id)
     based on their RFID UID. Used by the Ingestion API for data enrichment.
+    Now looks up via RFIDCard relationship instead of Student.rfid_uid.
     """
-    queryset = Student.objects.all()
     serializer_class = StudentLookupSerializer
-    lookup_field = 'rfid_uid'
-
-    def retrieve(self, request, *args, **kwargs):
+    
+    def get_object(self):
+        rfid_uid = self.kwargs.get('rfid_uid')
+        
         try:
-            instance = self.get_object()
-            # Ensure the user object is also present (as it's used in the serializer)
-            if not instance.user:
-                 raise NotFound("Student found, but has no linked user account.")
-        except NotFound:
-            # Return a simple 404 response if the student isn't found
-            raise NotFound("Student not found with this RFID UID.")
-
-        serializer = self.get_serializer(instance)
-        return Response(serializer.data)
+            rfid_card = RFIDCard.objects.select_related(
+                'assigned_to_student',
+                'assigned_to_student__school'
+            ).get(
+                uid=rfid_uid,
+                status='ACTIVE'
+            )
+            
+            student = rfid_card.assigned_to_student
+            
+            if not student:
+                raise NotFound(detail="RFID card exists but not assigned to any student.")
+            
+            return student
+            
+        except RFIDCard.DoesNotExist:
+            raise NotFound(detail=f"No active RFID card found with UID: {rfid_uid}")
 from rest_framework import generics
 from .models import AttendanceRecord
 from .serializers import AttendanceRecordSerializer
@@ -40,7 +47,6 @@ class AttendanceRecordsView(generics.ListAPIView):
     def get_queryset(self):
         queryset = AttendanceRecord.objects.select_related('student', 'student__classroom').all()
 
-        # Filters
         classroom_id = self.request.query_params.get('classroom_id')
         grade = self.request.query_params.get('grade')
         section = self.request.query_params.get('section')
@@ -58,10 +64,8 @@ class AttendanceRecordsView(generics.ListAPIView):
         if end_date:
             queryset = queryset.filter(date__lte=end_date)
 
-        # Order by date descending
         return queryset.order_by('-date', 'student__last_name')
 
-# service_management/student_management/views.py
 
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -97,7 +101,6 @@ def attendance_records(request):
         })
     
     return Response(data)
-# student_management/views.py (add this at the bottom)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -124,14 +127,11 @@ class LiveAttendanceAnalyticsView(APIView):
         else:
             filter_date = timezone.now().date()
         
-        # Base queryset: today's attendance records
         queryset = AttendanceRecord.objects.filter(date=filter_date)
         
-        # Optional classroom filter
         if classroom_id:
             queryset = queryset.filter(student__classroom_id=classroom_id)
         
-        # Serialize to simple JSON
         data = [
             {
                 "student_name": f"{record.student.first_name} {record.student.last_name}",

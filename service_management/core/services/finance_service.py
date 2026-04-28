@@ -20,7 +20,7 @@ class FinanceService:
         'DEBIT': WalletTransaction.TRANSACTION_TYPE_DEBIT
     }
 
-    # --- ABSTRACTED PAYMENT GATEWAY INTEGRATION ---
+    
     @staticmethod
     def _process_external_payment(amount: float, gateway_data: dict) -> str:
         """
@@ -31,23 +31,23 @@ class FinanceService:
         2. Verifying the payment status (e.g., successful, pending, failed).
         3. Returning a unique transaction ID (Razorpay ID).
         """
-        # --- PLACEHOLDER LOGIC ---
+        
         if not gateway_data.get('transaction_id'):
             raise BusinessRuleViolation("External payment gateway verification failed (Missing Transaction ID).")
         if amount <= 0:
             raise ValidationError("Payment amount must be positive.")
-        # --- END PLACEHOLDER ---
+        
 
-        # Return the verified transaction ID from the payment gateway
+        
         return gateway_data['transaction_id'] 
 
-    # --- HELPERS AND VALIDATION ---
+    
     
     @staticmethod
     def _get_wallet_by_student(student_id: int) -> Wallet:
         """Retrieves or creates the wallet for a given student."""
         student = get_object_or_404(Student, pk=student_id)
-        # Use get_or_create to ensure every student has a wallet
+        
         wallet, created = Wallet.objects.get_or_create(
             student=student, 
             school=student.school,
@@ -55,7 +55,7 @@ class FinanceService:
         )
         return wallet
 
-    # --- CORE TRANSACTION LOGIC ---
+    
 
     @classmethod
     @transaction.atomic
@@ -73,21 +73,21 @@ class FinanceService:
         if amount <= 0:
             raise ValidationError("Top-up amount must be positive.")
             
-        # 1. Payment Validity Rule: Verify the transaction with the external gateway
+        
         external_id = cls._process_external_payment(amount, gateway_data)
         
-        # 2. Check for duplicate processing using the external ID
+        
         if WalletTransaction.objects.filter(external_transaction_id=external_id).exists():
             raise DuplicateEntryError(f"Payment {external_id} has already been processed.")
 
-        # 3. Get Wallet
+        
         wallet = cls._get_wallet_by_student(student_id)
 
-        # 4. Execution (Credit Wallet)
+        
         wallet.balance += amount
         wallet.save(update_fields=['balance'])
 
-        # 5. Create Transaction Record
+        
         transaction_record = WalletTransaction.objects.create(
             wallet=wallet,
             school=wallet.school,
@@ -110,25 +110,25 @@ class FinanceService:
         if purchase_amount <= 0:
             raise ValidationError("Purchase amount must be positive.")
 
-        # 1. Get Wallet
+        
         wallet = cls._get_wallet_by_student(student_id)
 
-        # 2. Business Rule: Check Inventory Stock Constraint
-        # NOTE: This is where InventoryService (if created) would be called.
-        # if not InventoryService.check_stock(item_id, 1):
-        #     raise BusinessRuleViolation("Canteen item is out of stock.")
         
-        # 3. Business Rule: Sufficient Funds Check
+        
+        
+        
+        
+        
         if wallet.balance < purchase_amount:
             raise BusinessRuleViolation(
                 f"Insufficient funds. Wallet balance: {wallet.balance}, Required: {purchase_amount}"
             )
 
-        # 4. Execution (Debit Wallet)
+        
         wallet.balance -= purchase_amount
         wallet.save(update_fields=['balance'])
 
-        # 5. Create Transaction Record
+        
         transaction_record = WalletTransaction.objects.create(
             wallet=wallet,
             school=wallet.school,
@@ -138,7 +138,7 @@ class FinanceService:
             description="Canteen purchase"
         )
         
-        # 6. Side Effect: Reduce Canteen Stock (Conceptual)
-        # InventoryService.reduce_stock(item_id, 1)
+        
+        
 
         return transaction_record

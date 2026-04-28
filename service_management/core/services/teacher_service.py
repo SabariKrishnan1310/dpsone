@@ -58,14 +58,11 @@ class TeacherService:
         Assigns a specific teacher to teach a subject in a classroom, 
         ensuring no conflicting assignments exist.
         """
-        # 1. Validation and Resource Retrieval
         school = cls._validate_school_context(school_id)
         teacher = cls._validate_teacher(teacher_id, school)
         subject = cls._validate_subject(subject_id, school)
         classroom = cls._validate_classroom(classroom_id, school)
 
-        # 2. Business Rule: Prevent Duplicate Mapping
-        # A specific teacher should not be mapped to the exact same subject and classroom combination twice.
         if TeacherSubjectMapping.objects.filter(
             school=school,
             teacher=teacher,
@@ -76,12 +73,7 @@ class TeacherService:
                 f"Teacher {teacher.last_name} is already assigned to teach {subject.name} in {classroom.grade}-{classroom.section}."
             )
             
-        # 3. Business Rule: Prevent Conflicting Teaching Roles
-        # OPTIONAL: Add logic here to prevent a teacher from taking on too many hours 
-        # or too many core subjects (e.g., check against a maximum load constraint).
-        # This often involves checking the TimetableEntry model (which we haven't implemented a service for yet).
 
-        # 4. Execution (Creation)
         mapping = TeacherSubjectMapping.objects.create(
             school=school,
             teacher=teacher,
@@ -101,15 +93,11 @@ class TeacherService:
         teacher = get_object_or_404(Teacher, pk=teacher_id)
         school = cls._validate_school_context(teacher.school_id)
         
-        # 1. Validation: Ensure the classroom is valid
         new_homeroom = cls._validate_classroom(classroom_id, school)
         
-        # 2. Business Rule: Prevent multiple homeroom teachers for one class
         if Classroom.objects.filter(homeroom_teacher=teacher).exclude(pk=new_homeroom.pk).exists():
-            # Remove the teacher from their old homeroom if applicable
             Classroom.objects.filter(homeroom_teacher=teacher).update(homeroom_teacher=None)
 
-        # 3. Execution
         new_homeroom.homeroom_teacher = teacher
         new_homeroom.save(update_fields=['homeroom_teacher'])
 

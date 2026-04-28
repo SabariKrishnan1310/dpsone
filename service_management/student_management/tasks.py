@@ -1,4 +1,3 @@
-# service_management/student_management/tasks.py
 import json
 from celery import shared_task
 from asgiref.sync import async_to_sync
@@ -24,7 +23,6 @@ def process_tap_from_queue(self, tap_data_json: str):
             print(f"ERROR: Missing essential keys in task data. Data: {tap_data}")
             return
 
-        # --- Process the tap (update DB) ---
         RfidService.process_student_tap(
             rfid_uid=rfid_uid,
             device_id=device_id,
@@ -32,7 +30,6 @@ def process_tap_from_queue(self, tap_data_json: str):
             school_id=school_id
         )
 
-        # --- Fetch attendance record for broadcast ---
         try:
             student = Student.objects.select_related('classroom').get(rfid_uid=rfid_uid)
             attendance_record = AttendanceRecord.objects.filter(student=student).latest('tap_timestamp')
@@ -43,7 +40,6 @@ def process_tap_from_queue(self, tap_data_json: str):
             print(f"No attendance record found for student {rfid_uid} to broadcast.")
             return
 
-        # --- Broadcast to WebSocket ---
         channel_layer = get_channel_layer()
         group_name = f"school_{school_id}"
 

@@ -1,77 +1,54 @@
-# service_management/student_management/admin.py (FINAL, ROBUST FIX)
 
 from django.contrib import admin
-# We need to import forms and the base UserAdmin
 from django import forms 
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (
-    # Custom User Model
     StudentManagementUser, 
-    # Core Tenancy and Structure
     School, 
     Classroom, 
-    # Profile Models
     Teacher, 
     Parent, 
     Student,
-    # RFID/Attendance
     TapLog, 
     AttendanceRecord,
     RFIDCard,
-    # Timetable/Subjects
     Subject,
     TeacherSubjectMapping, 
     TimetableEntry,
-    # Communications
     Announcement,
     MessageThread,
     Message,
-    # Financial/Canteen
     CanteenItem,
     Wallet,
     WalletTransaction,
 )
 
-# ----------------------------------------------------
-# 1. Custom User Forms (NEW CRITICAL ADDITION)
-# ----------------------------------------------------
 
-# Form used when editing an existing user (Change View)
 class StudentManagementUserChangeForm(forms.ModelForm):
     class Meta:
         model = StudentManagementUser
-        # Use all fields for simplicity, or explicitly list them (excluding 'username')
         fields = '__all__'
         
-# Form used when creating a new user (Add User page)
-# This explicitly defines the fields and excludes 'username'
 class StudentManagementUserCreationForm(forms.ModelForm):
-    # These fields are required by the BaseUserAdmin add_view logic
     password = forms.CharField(label='Password', widget=forms.PasswordInput)
     password2 = forms.CharField(label='Password confirmation', widget=forms.PasswordInput)
 
     class Meta:
         model = StudentManagementUser
-        # IMPORTANT: Use only the fields present in your custom model (StudentManagementUser)
         fields = ('email', 'first_name', 'last_name', 'role', 'school')
 
     def clean_password2(self):
-        # Basic password confirmation check
         password = self.cleaned_data.get('password')
         password2 = self.cleaned_data.get('password2')
         if password and password2 and password != password2:
             raise forms.ValidationError("Passwords don't match.")
         return password2
         
-# ----------------------------------------------------
-# 2. Custom User Admin Class
-# ----------------------------------------------------
 
 class CustomUserAdmin(BaseUserAdmin):
     """Admin configuration for the custom user model."""
     
-    # *** CRITICAL: Assign the custom forms to override BaseUserAdmin's defaults ***
     form = StudentManagementUserChangeForm
     add_form = StudentManagementUserCreationForm
 
@@ -79,7 +56,6 @@ class CustomUserAdmin(BaseUserAdmin):
     search_fields = ('email', 'first_name', 'last_name')
     ordering = ('email',)
     
-    # 1. Fieldsets for the 'CHANGE' view (Editing existing user)
     fieldsets = (
         (None, {'fields': ('email', 'password')}), 
         ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
@@ -89,19 +65,15 @@ class CustomUserAdmin(BaseUserAdmin):
         ('Important dates', {'fields': ('last_login', 'date_joined')}),
     )
 
-    # 2. Fieldsets for the 'ADD' view (Creating a new user)
-    # This must still be defined, but now it references fields from the add_form
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            # Note: Fields here must match fields defined in StudentManagementUserCreationForm
             'fields': ('email', 'password', 'password2'), 
         }),
         ('Personal info', {'fields': ('first_name', 'last_name', 'role', 'school')}),
         ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser')}), 
     )
 
-# Inline models for quick access
 class StudentInline(admin.StackedInline):
     model = Student
     can_delete = False
@@ -124,9 +96,6 @@ class StudentManagementUserAdmin(CustomUserAdmin):
 admin.site.register(StudentManagementUser, StudentManagementUserAdmin)
 
 
-# ----------------------------------------------------
-# 3. Core Structure Admin (Registrations)
-# ----------------------------------------------------
 
 @admin.register(School)
 class SchoolAdmin(admin.ModelAdmin):
@@ -152,14 +121,41 @@ class ParentAdmin(admin.ModelAdmin):
 
 @admin.register(Student)
 class StudentAdmin(admin.ModelAdmin):
-    list_display = ('last_name', 'first_name', 'classroom', 'roll_number', 'rfid_uid', 'is_active')
+    list_display = ('roll_number', 'last_name', 'first_name', 'classroom', 'get_rfid_status', 'is_active')
     list_filter = ('school', 'classroom', 'is_active')
-    search_fields = ('last_name', 'rfid_uid', 'admission_number')
+    search_fields = ('last_name', 'admission_number')
+    readonly_fields = ('get_active_rfid_card',)
+    
+    fieldsets = (
+        ('Personal Info', {
+            'fields': ('first_name', 'last_name', 'dob', 'gender', 'blood_group', 'photo_url')
+        }),
+        ('Enrollment', {
+            'fields': ('school', 'classroom', 'parent', 'admission_number', 'roll_number', 'is_active')
+        }),
+        ('RFID Info (Read-Only)', {
+            'fields': ('get_active_rfid_card',),
+            'description': 'RFID cards are linked via the RFIDCard model. Use the RFIDCard admin below to assign cards.'
+        }),
+    )
+    
+    def get_rfid_status(self, obj):
+        """Display RFID assignment status"""
+        rfid_card = obj.rfid_cards.filter(status='ACTIVE').first()
+        if rfid_card:
+            return f"✅ {rfid_card.uid}"
+        return "❌ No Active Card"
+    get_rfid_status.short_description = 'RFID Card Status'
+    
+    def get_active_rfid_card(self, obj):
+        """Display active RFID card details"""
+        rfid_card = obj.rfid_cards.filter(status='ACTIVE').first()
+        if rfid_card:
+            return f"UID: {rfid_card.uid} | Status: {rfid_card.status} | Issued: {rfid_card.issued_at}"
+        return "No active RFID card assigned"
+    get_active_rfid_card.short_description = 'Active RFID Card'
 
 
-# ----------------------------------------------------
-# 4. RFID/Attendance Admin
-# ----------------------------------------------------
 
 @admin.register(TapLog)
 class TapLogAdmin(admin.ModelAdmin):
@@ -178,12 +174,30 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
 @admin.register(RFIDCard)
 class RFIDCardAdmin(admin.ModelAdmin):
     list_display = ('uid', 'status', 'assigned_to_student', 'assigned_to_teacher', 'issued_at')
-    list_filter = ('school', 'status')
-    search_fields = ('uid',)
+    list_filter = ('school', 'status', 'issued_at')
+    search_fields = ('uid', 'assigned_to_student__last_name', 'assigned_to_teacher__last_name')
     
-# ----------------------------------------------------
-# 5. Timetable/Subjects Admin
-# ----------------------------------------------------
+    fieldsets = (
+        ('Card Information', {
+            'fields': ('school', 'uid', 'status')
+        }),
+        ('Assignments', {
+            'fields': ('assigned_to_student', 'assigned_to_teacher'),
+            'description': 'A card can be assigned to either a student OR a teacher, not both.'
+        }),
+        ('Timestamps', {
+            'fields': ('issued_at',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def save_model(self, request, obj, form, change):
+        """Validation: Ensure card is only assigned to one person"""
+        if obj.assigned_to_student and obj.assigned_to_teacher:
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            raise DjangoValidationError("A card cannot be assigned to both student and teacher.")
+        super().save_model(request, obj, form, change)
+    
 
 @admin.register(Subject)
 class SubjectAdmin(admin.ModelAdmin):
@@ -201,9 +215,6 @@ class TimetableEntryAdmin(admin.ModelAdmin):
     list_filter = ('school', 'day_of_week', 'classroom')
     list_editable = ('teacher',)
 
-# ----------------------------------------------------
-# 6. Communication/Other Admin
-# ----------------------------------------------------
 
 @admin.register(Announcement)
 class AnnouncementAdmin(admin.ModelAdmin):

@@ -5,7 +5,7 @@ from channels.auth import AuthMiddlewareStack
 from django.core.asgi import get_asgi_application
 import student_management.routing
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "dps_core.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "sterlingone_core.settings")
 django.setup()
 
 application = ProtocolTypeRouter({
