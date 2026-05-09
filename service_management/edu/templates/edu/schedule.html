@@ -1,0 +1,17 @@
+{% extends 'edu/base.html' %}
+{% block content %}
+<div class="p-8">
+    <h1 class="text-2xl font-bold">My Schedule</h1>
+    <div class="grid grid-cols-1 gap-4 mt-4">
+        {% for slot in slots %}
+        <div class="p-4 bg-white rounded-xl shadow-sm border border-gray-100">
+            <h2 class="font-bold">{{ slot.subject }}</h2>
+            <p>{{ slot.day_of_week }} | {{ slot.start_time }} - {{ slot.end_time }}</p>
+            <p class="text-gray-500">{{ slot.classroom }}</p>
+        </div>
+        {% empty %}
+        <p>No schedule found.</p>
+        {% endfor %}
+    </div>
+</div>
+{% endblock %}

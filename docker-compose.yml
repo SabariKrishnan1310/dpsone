@@ -13,7 +13,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data/
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U sterlingone" ]
+      test: ["CMD-SHELL", "pg_isready -U sterlingone"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -29,7 +29,7 @@ services:
       context: ./service_ingestion
       dockerfile: Dockerfile
     container_name: sterlingone_ingestion_api
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     depends_on:
@@ -37,6 +37,8 @@ services:
         condition: service_started
       db:
         condition: service_healthy
+    volumes:
+      - ./service_ingestion:/app
     environment:
       POSTGRES_HOST: db
       REDIS_HOST: redis
@@ -49,8 +51,7 @@ services:
       context: ./service_management
       dockerfile: Dockerfile
     container_name: sterlingone_management_web
-    command: daphne -b 0.0.0.0 -p 8001 sterlingone_core.asgi:application
-
+    command: daphne -b 0.0.0.0 -p 8001 base_core.asgi:application
     ports:
       - "8001:8001"
     depends_on:
@@ -58,28 +59,29 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+    volumes:
+      - ./service_management:/usr/src/app
     environment:
-      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
+      DJANGO_SETTINGS_MODULE: base_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
       POSTGRES_DB: sterlingone_db
       POSTGRES_USER: sterlingone
       POSTGRES_PASSWORD: SterlingONE
 
-    volumes:
-      - ./service_management/staticfiles:/usr/src/app/staticfiles
-
   management_worker:
     build:
       context: ./service_management
       dockerfile: Dockerfile
     container_name: sterlingone_management_worker
-    command: celery -A sterlingone_core worker -l info
+    command: celery -A base_core worker -l info
     depends_on:
       - db
       - redis
+    volumes:
+      - ./service_management:/usr/src/app
     environment:
-      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
+      DJANGO_SETTINGS_MODULE: base_core.settings
       POSTGRES_HOST: db
       REDIS_HOST: redis
       POSTGRES_DB: sterlingone_db
@@ -95,10 +97,30 @@ services:
     depends_on:
       - redis
       - management_worker
+    volumes:
+      - ./service_management:/usr/src/app
     environment:
-      DJANGO_SETTINGS_MODULE: sterlingone_core.settings
+      DJANGO_SETTINGS_MODULE: base_core.settings
       REDIS_HOST: redis
 
+  edu_worker:
+    build:
+      context: ./service_management
+      dockerfile: Dockerfile
+    container_name: sterlingone_edu_worker
+    command: python manage.py run_edu_worker
+    depends_on:
+      - db
+      - redis
+    volumes:
+      - ./service_management:/usr/src/app
+    environment:
+      DJANGO_SETTINGS_MODULE: base_core.settings
+      POSTGRES_HOST: db
+      REDIS_HOST: redis
+      POSTGRES_DB: sterlingone_db
+      POSTGRES_USER: sterlingone
+      POSTGRES_PASSWORD: SterlingONE
 
 volumes:
   postgres_data:
